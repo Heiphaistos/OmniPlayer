@@ -1,6 +1,6 @@
 use egui::{
     Align, Color32, CornerRadius, FontId, Id, Layout, RichText, ScrollArea,
-    Sense, Stroke, TextStyle, Ui, Vec2, Window,
+    Sense, Stroke, Ui, Vec2, Window,
 };
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -110,6 +110,7 @@ impl FileBrowser {
         self.refresh();
     }
 
+    #[allow(dead_code)]
     fn selected_path(&self) -> Option<&Path> {
         self.selected.and_then(|i| {
             let e = self.visible_entries().nth(i)?;

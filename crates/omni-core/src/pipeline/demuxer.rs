@@ -37,13 +37,15 @@ pub fn run_demuxer(
     let v_idx = ctx.video_stream_idx;
     let a_idx = ctx.audio_stream_idx;
 
-    let v_tb = v_idx.map(|i| {
-        let s = ctx.format_ctx.stream(i).unwrap();
-        s.time_base().numerator() as f64 / s.time_base().denominator() as f64
+    let v_tb = v_idx.and_then(|i| {
+        ctx.format_ctx.stream(i).map(|s| {
+            s.time_base().numerator() as f64 / s.time_base().denominator().max(1) as f64
+        })
     }).unwrap_or(0.0);
-    let a_tb = a_idx.map(|i| {
-        let s = ctx.format_ctx.stream(i).unwrap();
-        s.time_base().numerator() as f64 / s.time_base().denominator() as f64
+    let a_tb = a_idx.and_then(|i| {
+        ctx.format_ctx.stream(i).map(|s| {
+            s.time_base().numerator() as f64 / s.time_base().denominator().max(1) as f64
+        })
     }).unwrap_or(0.0);
 
     let mut video_dec = v_idx
@@ -65,7 +67,25 @@ pub fn run_demuxer(
                 PipelineCommand::Stop   => break 'main,
                 PipelineCommand::Pause  => paused = true,
                 PipelineCommand::Resume => paused = false,
-                PipelineCommand::Seek(pos) => { ctx.seek(pos)?; }
+                PipelineCommand::Seek(pos) => {
+                    ctx.seek(pos)?;
+                    // Vide les buffers internes des décodeurs pour éviter les artefacts post-seek
+                    if let Some(dec) = &mut video_dec {
+                        let _ = dec.send_eof();
+                        while dec.receive_frame().ok().flatten().is_some() {}
+                    }
+                    if let Some(dec) = &mut audio_dec {
+                        let _ = dec.send_eof();
+                        while dec.receive_frame().ok().flatten().is_some() {}
+                    }
+                    // Reconstruit les décodeurs pour repartir d'un état propre
+                    video_dec = v_idx
+                        .and_then(|_| ctx.build_video_decoder().ok())
+                        .and_then(|d| VideoDecoder::new(d, v_tb).ok());
+                    audio_dec = a_idx
+                        .and_then(|_| ctx.build_audio_decoder().ok())
+                        .and_then(|d| AudioDecoder::new(d, a_tb).ok());
+                }
                 _ => {}
             }
         }

@@ -7,38 +7,67 @@ use omni_core::decoder::DecodedVideoFrame;
 const SHADER_SRC: &str = include_str!("../../../assets/shaders/yuv_to_rgb.wgsl");
 
 /// Renderer wgpu : upload YUV → rendu RGB via shader WGSL.
-/// S'intègre dans egui via `egui_wgpu::CallbackFn`.
 pub struct VideoRenderer {
-    pipeline:        RenderPipeline,
-    sampler:         Sampler,
+    pipeline:          RenderPipeline,
+    sampler:           Sampler,
     bind_group_layout: BindGroupLayout,
-    bind_group:      Option<BindGroup>,
-    yuv_textures:    Option<YuvTextures>,
-    #[allow(dead_code)] uniform_buf: Buffer,
-    uniform_bg:      BindGroup,
+    bind_group:        Option<BindGroup>,
+    yuv_textures:      Option<YuvTextures>,
+    uniform_buf:       Buffer,
+    uniform_bg:        BindGroup,
     #[allow(dead_code)] uniform_bgl: BindGroupLayout,
+    current_color_space: u32,  // 0=BT601, 1=BT709, 2=BT2020
 }
 
-/// Uniforms envoyés au shader (matrice couleur + offset).
+/// Uniforms envoyés au shader — layout colonne-major pour WGSL mat4x4.
+/// `matrix[i]` = ième colonne. Vecteur input = [y', u', v', 1.0].
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ColorUniforms {
-    /// Matrice 4×4 (BT.601 / BT.709 / BT.2020) — row-major
     matrix: [[f32; 4]; 4],
     offset: [f32; 4],
 }
 
 impl ColorUniforms {
-    fn bt709() -> Self {
-        // BT.709 (HDTV/1080p+)
+    // BT.601 limited (contenu SD / DVD)
+    // R = 1.164*y + 1.596*v, G = 1.164*y - 0.392*u - 0.813*v, B = 1.164*y + 2.017*u
+    fn bt601() -> Self {
         Self {
             matrix: [
-                [1.0,     0.0,     1.5748, 0.0],
-                [1.0,    -0.1873, -0.4681, 0.0],
-                [1.0,     1.8556,  0.0,    0.0],
-                [0.0,     0.0,     0.0,    1.0],
+                [1.164, 1.164, 1.164, 0.0],
+                [0.0, -0.392, 2.017, 0.0],
+                [1.596, -0.813, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
             ],
-            offset: [0.0, 0.0, 0.0, 0.0],
+            offset: [0.0; 4],
+        }
+    }
+
+    // BT.709 limited (H.264/H.265, 1080p+)
+    // R = 1.164*y + 1.793*v, G = 1.164*y - 0.213*u - 0.533*v, B = 1.164*y + 2.112*u
+    fn bt709() -> Self {
+        Self {
+            matrix: [
+                [1.164, 1.164, 1.164, 0.0],
+                [0.0, -0.213, 2.112, 0.0],
+                [1.793, -0.533, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            offset: [0.0; 4],
+        }
+    }
+
+    // BT.2020 limited (HDR / 4K UHD)
+    // R = 1.164*y + 1.678*v, G = 1.164*y - 0.187*u - 0.652*v, B = 1.164*y + 2.142*u
+    fn bt2020() -> Self {
+        Self {
+            matrix: [
+                [1.164, 1.164, 1.164, 0.0],
+                [0.0, -0.187, 2.142, 0.0],
+                [1.678, -0.652, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            offset: [0.0; 4],
         }
     }
 }
@@ -148,7 +177,20 @@ impl VideoRenderer {
             uniform_buf,
             uniform_bg,
             uniform_bgl,
+            current_color_space: 1,  // BT.709 par défaut
         })
+    }
+
+    /// Met à jour l'espace colorimétrique (0=BT601, 1=BT709, 2=BT2020).
+    pub fn set_color_space(&mut self, queue: &Queue, cs: u32) {
+        if self.current_color_space == cs { return; }
+        let uniforms = match cs {
+            0 => ColorUniforms::bt601(),
+            2 => ColorUniforms::bt2020(),
+            _ => ColorUniforms::bt709(),
+        };
+        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        self.current_color_space = cs;
     }
 
     /// Met à jour les textures avec un nouveau frame.

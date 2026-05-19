@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,11 +10,10 @@ pub struct MasterClock {
 }
 
 struct ClockInner {
-    /// Position en microsecondes (×1_000_000).
     pos_us:    AtomicI64,
-    /// Dernier instant réel où le clock a été mis à jour.
     updated:   parking_lot::Mutex<Instant>,
-    paused:    AtomicI64,  // 0 = en cours, 1 = pausé
+    paused:    AtomicI64,
+    speed:     AtomicU32,  // f32::to_bits(), default 1.0
 }
 
 impl MasterClock {
@@ -24,6 +23,7 @@ impl MasterClock {
                 pos_us:  AtomicI64::new(0),
                 updated: parking_lot::Mutex::new(Instant::now()),
                 paused:  AtomicI64::new(0),
+                speed:   AtomicU32::new(1.0f32.to_bits()),
             }),
         }
     }
@@ -35,14 +35,24 @@ impl MasterClock {
         *self.inner.updated.lock() = Instant::now();
     }
 
-    /// Retourne la position estimée en secondes (interpolée depuis la dernière mise à jour).
     pub fn position_secs(&self) -> f64 {
         let base_us = self.inner.pos_us.load(Ordering::Relaxed) as f64;
         if self.is_paused() {
             return base_us / 1_000_000.0;
         }
-        let elapsed = self.inner.updated.lock().elapsed().as_micros() as f64;
-        (base_us + elapsed) / 1_000_000.0
+        let elapsed  = self.inner.updated.lock().elapsed().as_micros() as f64;
+        let speed    = f32::from_bits(self.inner.speed.load(Ordering::Relaxed)) as f64;
+        (base_us + elapsed * speed) / 1_000_000.0
+    }
+
+    pub fn set_speed(&self, speed: f32) {
+        let pos = self.position_secs();
+        self.inner.speed.store(speed.max(0.1).to_bits(), Ordering::Relaxed);
+        self.update(pos);
+    }
+
+    pub fn speed(&self) -> f32 {
+        f32::from_bits(self.inner.speed.load(Ordering::Relaxed))
     }
 
     pub fn seek(&self, pos_secs: f64) {
@@ -50,9 +60,13 @@ impl MasterClock {
     }
 
     pub fn pause(&self) {
+        // Snapshot position WITH elapsed BEFORE setting paused flag (évite de perdre le temps écoulé)
+        let pos = {
+            let base_us = self.inner.pos_us.load(Ordering::Relaxed) as f64;
+            let elapsed = self.inner.updated.lock().elapsed().as_micros() as f64;
+            (base_us + elapsed) / 1_000_000.0
+        };
         self.inner.paused.store(1, Ordering::Relaxed);
-        // Snapshot la position au moment de la pause
-        let pos = self.position_secs();
         self.update(pos);
     }
 

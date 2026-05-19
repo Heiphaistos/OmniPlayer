@@ -33,14 +33,13 @@ pub struct OmniApp {
     video_frame:       SharedFrame,
     osd:               Option<Osd>,
     #[allow(dead_code)] services: Option<ServicesClient>,
-    // Auto-hide controls
     last_mouse_move:   f64,
-    // Image viewer
     image_viewer:      ImageViewer,
     image_texture:     Option<egui::TextureHandle>,
     image_path_loaded: String,
-    // A/V sync: frame en attente d'affichage (PTS pas encore atteint)
     pending_video_frame: Option<omni_core::decoder::DecodedVideoFrame>,
+    video_color_space: u32,   // 0=BT601, 1=BT709, 2=BT2020
+    last_title:        String, // pour détecter les changements de fichier
 }
 
 impl OmniApp {
@@ -74,6 +73,8 @@ impl OmniApp {
             image_texture: None,
             image_path_loaded: String::new(),
             pending_video_frame: None,
+            video_color_space: 1,
+            last_title: String::new(),
         }
     }
 
@@ -156,15 +157,11 @@ impl OmniApp {
         audio.set_paused(self.player.state == PlayerState::Paused);
         audio.set_volume(self.player.effective_volume());
 
-        // N'envoie des frames que si le buffer audio a moins de 1.5 s d'avance.
-        // Évite d'inonder le ring buffer et de causer des saccades.
-        const MAX_LOOKAHEAD_SECS: f64 = 1.5;
-        while audio.buffered_secs() < MAX_LOOKAHEAD_SECS {
-            if let Some(frame) = self.player.try_recv_audio_frame() {
-                audio.push_frame(frame);
-            } else {
-                break;
-            }
+        // Drainer toutes les frames disponibles — push_frame est non-bloquant (try_send).
+        // Le canal interne (512) + la backpressure de fill_ring (3 s) régulent le débit.
+        // Ne PAS limiter ici pour éviter d'engorger audio_rx (ce qui bloque le demuxer vidéo).
+        while let Some(frame) = self.player.try_recv_audio_frame() {
+            audio.push_frame(frame);
         }
     }
 
@@ -177,11 +174,13 @@ impl OmniApp {
 
         // Si on a un frame en attente, l'afficher dès que son PTS est atteint
         if let Some(ref pf) = self.pending_video_frame {
-            if pf.pts_secs <= clock + 0.020 {
+            let diff = pf.pts_secs - clock;
+            // Affiche si PTS atteint (diff <= 20ms) OU si le frame attend depuis trop longtemps
+            // (clock gelé → afficher quand même pour éviter un freeze total)
+            if diff <= 0.020 || diff > 2.0 {
                 let frame = self.pending_video_frame.take().unwrap();
                 *self.video_frame.lock() = Some(frame);
             }
-            // Ne pas dépiler d'autres frames tant que le pending n'est pas montré
             return;
         }
 
@@ -225,6 +224,9 @@ impl OmniApp {
         if ctx.wants_keyboard_input() { return; }
 
         let keys = ctx.input(|i| {
+            let shift = i.modifiers.shift;
+            let alt   = i.modifiers.alt;
+            let ctrl  = i.modifiers.ctrl;
             (
                 i.key_pressed(Key::Space),
                 i.key_pressed(Key::ArrowLeft),
@@ -239,30 +241,51 @@ impl OmniApp {
                 i.key_pressed(Key::N),
                 i.key_pressed(Key::P),
                 i.key_pressed(Key::I),
-                i.modifiers.ctrl && i.key_pressed(Key::O),
-                i.modifiers.ctrl && i.key_pressed(Key::L),
-                i.modifiers.ctrl && i.key_pressed(Key::P),
-                i.modifiers.ctrl && i.key_pressed(Key::Q),
+                ctrl && i.key_pressed(Key::O),
+                ctrl && i.key_pressed(Key::L),
+                ctrl && i.key_pressed(Key::P),
+                ctrl && i.key_pressed(Key::Q),
+                i.key_pressed(Key::W),
+                i.key_pressed(Key::L),
+                i.key_pressed(Key::OpenBracket),
+                i.key_pressed(Key::CloseBracket),
+                shift,
+                alt,
             )
         });
         let (k_space, k_left, k_right, k_up, k_down,
              k_f, k_esc, k_s, k_a, k_m, k_n, k_p, k_i,
-             k_ctrl_o, k_ctrl_l, k_ctrl_p, k_ctrl_q) = keys;
+             k_ctrl_o, k_ctrl_l, k_ctrl_p, k_ctrl_q,
+             k_w, k_l, k_open_br, k_close_br,
+             shift, alt) = keys;
 
         if k_space  { self.player.play_pause(); }
-        if k_left   { self.player.seek_relative(-10.0); self.set_osd("−10 s"); self.last_mouse_move = now; }
-        if k_right  { self.player.seek_relative(10.0);  self.set_osd("+10 s");  self.last_mouse_move = now; }
-        if k_up     {
+
+        // Seek avec modificateurs: Alt=±1s, Shift=±60s, normal=±10s
+        if k_left {
+            let delta = if alt { -1.0 } else if shift { -60.0 } else { -10.0 };
+            self.player.seek_relative(delta);
+            self.set_osd(format!("{delta:+.0} s"));
+            self.last_mouse_move = now;
+        }
+        if k_right {
+            let delta = if alt { 1.0 } else if shift { 60.0 } else { 10.0 };
+            self.player.seek_relative(delta);
+            self.set_osd(format!("{delta:+.0} s"));
+            self.last_mouse_move = now;
+        }
+
+        if k_up {
             let v = (self.player.volume + 0.1).min(2.0);
             self.player.set_volume(v);
             self.set_osd(format!("Volume {:.0}%", v * 100.0));
         }
-        if k_down   {
+        if k_down {
             let v = (self.player.volume - 0.1).max(0.0);
             self.player.set_volume(v);
             self.set_osd(format!("Volume {:.0}%", v * 100.0));
         }
-        if k_m      {
+        if k_m {
             self.player.toggle_mute();
             self.set_osd(if self.player.muted { "Muet" } else { "Son actif" });
         }
@@ -276,6 +299,31 @@ impl OmniApp {
         if k_ctrl_p { self.show_playlist     = !self.show_playlist; }
         if k_ctrl_q { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
 
+        if k_w {
+            self.config.aspect_mode = self.config.aspect_mode.next();
+            self.set_osd(format!("Format : {}", self.config.aspect_mode.label()));
+        }
+
+        if k_l {
+            self.config.loop_mode = self.config.loop_mode.next();
+            self.set_osd(format!("Répétition : {}", self.config.loop_mode.label()));
+        }
+
+        // Vitesse [ = ralentir, ] = accélérer
+        const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0];
+        if k_open_br {
+            let cur = self.player.speed();
+            if let Some(&s) = SPEEDS.iter().rev().find(|&&s| s < cur - 0.01) {
+                self.apply_speed(s);
+            }
+        }
+        if k_close_br {
+            let cur = self.player.speed();
+            if let Some(&s) = SPEEDS.iter().find(|&&s| s > cur + 0.01) {
+                self.apply_speed(s);
+            }
+        }
+
         if k_f {
             self.is_fullscreen = !self.is_fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
@@ -283,6 +331,16 @@ impl OmniApp {
         if k_esc && self.is_fullscreen {
             self.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+    }
+
+    fn apply_speed(&mut self, speed: f32) {
+        self.player.set_speed(speed);
+        self.config.playback_speed = speed;
+        if (speed - 1.0).abs() < 0.01 {
+            self.set_osd("Vitesse : 1×".to_string());
+        } else {
+            self.set_osd(format!("Vitesse : {speed}×"));
         }
     }
 
@@ -305,6 +363,36 @@ impl OmniApp {
                     self.open_file(path);
                 }
             }
+        }
+    }
+
+    fn detect_color_space(info: &omni_core::probe::MediaInfo) -> u32 {
+        if let Some(v) = &info.video {
+            let cs = v.color_space.to_lowercase();
+            if cs.contains("bt470") || cs.contains("smpte170") || cs.contains("bt601") {
+                return 0;
+            }
+            if cs.contains("bt2020") || v.hdr {
+                return 2;
+            }
+            if cs.contains("bt709") {
+                return 1;
+            }
+            // Heuristique résolution: SD → BT.601, 4K HDR → BT.2020
+            let px = v.width * v.height;
+            if px <= 640 * 480 { return 0; }
+            if px >= 3840 * 2160 && v.hdr { return 2; }
+        }
+        1 // BT.709 par défaut
+    }
+
+    fn update_window_title(&mut self, ctx: &egui::Context) {
+        let title = self.player.display_title()
+            .map(|t| format!("OmniPlayer — {t}"))
+            .unwrap_or_else(|| "OmniPlayer".to_string());
+        if title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
         }
     }
 
@@ -352,9 +440,53 @@ impl eframe::App for OmniApp {
         self.pump_video();
         self.ensure_image_texture(ctx);
 
+        // Détection espace colorimétrique lors du chargement des métadonnées
+        if let Some(info) = &self.player.media_info {
+            let cs = Self::detect_color_space(info);
+            self.video_color_space = cs;
+        }
+
+        // Titre fenêtre dynamique
+        self.update_window_title(ctx);
+
         if self.player.state == PlayerState::EndOfFile {
             self.pending_video_frame = None;
-            self.playlist_next();
+            match &self.config.loop_mode.clone() {
+                crate::config::LoopMode::One => {
+                    self.player.seek(0.0);
+                    self.player.state = PlayerState::Playing;
+                }
+                crate::config::LoopMode::All => {
+                    let next = self.playlist_idx.map(|i| i + 1).unwrap_or(0);
+                    let path = if next < self.playlist_items.len() {
+                        self.playlist_idx = Some(next);
+                        Some(self.playlist_items[next].clone())
+                    } else if !self.playlist_items.is_empty() {
+                        self.playlist_idx = Some(0);
+                        Some(self.playlist_items[0].clone())
+                    } else { None };
+                    if let Some(p) = path { self.open_file(p); }
+                }
+                crate::config::LoopMode::Off => {
+                    // Essaie de passer au suivant ; si aucun, repasse en Paused
+                    // pour que les contrôles restent utilisables
+                    let had_next = if let Some(idx) = self.playlist_idx {
+                        let next = idx + 1;
+                        if next < self.playlist_items.len() {
+                            let path = self.playlist_items[next].clone();
+                            self.playlist_idx = Some(next);
+                            self.open_file(path);
+                            true
+                        } else { false }
+                    } else { false };
+
+                    if !had_next {
+                        // Fin de playlist : rester sur la dernière frame, état Paused
+                        self.player.state = PlayerState::Paused;
+                        self.player.clock.pause();
+                    }
+                }
+            }
         }
 
         // Entrées clavier
@@ -401,36 +533,61 @@ impl eframe::App for OmniApp {
         }
 
         // ── Zone centrale (vidéo) ─────────────────────────────────────────
+        let mut toggle_fs = false;
         CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
                 let osd = self.osd_text(now).map(|s| s.to_string());
-                player_view::show(
+                toggle_fs = player_view::show(
                     ui, &self.player,
                     Arc::clone(&self.video_frame),
                     osd.as_deref(),
                     self.image_texture.as_ref(),
                     &mut self.image_viewer,
+                    &self.config.aspect_mode,
+                    self.video_color_space,
                 );
             });
+        if toggle_fs {
+            self.is_fullscreen = !self.is_fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+        }
 
         // ── Contrôles overlay (auto-hide) ─────────────────────────────────
         if controls_vis {
             let screen = ctx.screen_rect();
+            let mut speed_out: Option<f32> = None;
             egui::Area::new(Id::new("controls_overlay"))
                 .fixed_pos(egui::pos2(screen.left(), screen.bottom() - 92.0))
                 .order(Order::Foreground)
                 .show(ctx, |ui| {
                     ui.set_width(screen.width());
-                    controls::show(ui, &mut self.player, &mut self.seek_request);
+                    controls::show(
+                        ui, &mut self.player, &mut self.seek_request,
+                        &mut self.config.loop_mode,
+                        &mut self.config.aspect_mode,
+                        &mut speed_out,
+                        self.audio.is_some(),
+                    );
                 });
+            if let Some(s) = speed_out {
+                self.apply_speed(s);
+            }
         }
 
         // ── Info overlay ──────────────────────────────────────────────────
         if self.show_info {
             if let Some(info) = &self.player.media_info.clone() {
                 let is_hdr = info.video.as_ref().map(|v| v.hdr).unwrap_or(false);
-                info_overlay::show(ctx, info, is_hdr);
+                let stats = info_overlay::RuntimeStats {
+                    buffered_secs: self.audio.as_ref().map(|a| a.buffered_secs()).unwrap_or(0.0),
+                    clock_secs:    self.player.clock.position_secs(),
+                    speed:         self.player.speed(),
+                    aspect_label:  self.config.aspect_mode.label(),
+                    loop_label:    self.config.loop_mode.label(),
+                    color_space:   self.video_color_space,
+                };
+                info_overlay::show(ctx, info, is_hdr, Some(&stats));
             }
         }
 

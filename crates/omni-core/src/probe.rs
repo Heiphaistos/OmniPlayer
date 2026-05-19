@@ -102,7 +102,7 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
                         width:      dec.width(),
                         height:     dec.height(),
                         fps:        fps_f,
-                        bit_rate:   stream.avg_frame_rate().numerator() as i64,
+                        bit_rate:   dec.bit_rate() as i64,
                         hdr,
                         color_space,
                     });

@@ -1,13 +1,22 @@
 use egui::{Color32, Context, RichText};
 use omni_core::probe::MediaInfo;
 
+pub struct RuntimeStats {
+    pub buffered_secs:  f64,
+    pub clock_secs:     f64,
+    pub speed:          f32,
+    pub aspect_label:   &'static str,
+    pub loop_label:     &'static str,
+    pub color_space:    u32,
+}
+
 const BG:      Color32 = Color32::from_black_alpha(210);
 const ACCENT:  Color32 = Color32::from_rgb(74, 158, 255);
 const DIM:     Color32 = Color32::from_gray(140);
 const WHITE:   Color32 = Color32::WHITE;
 
 /// Overlay info technique (touche I). Affiché en haut-droite de l'écran.
-pub fn show(ctx: &Context, info: &MediaInfo, is_hdr: bool) {
+pub fn show(ctx: &Context, info: &MediaInfo, is_hdr: bool, stats: Option<&RuntimeStats>) {
     let screen = ctx.screen_rect();
 
     egui::Area::new(egui::Id::new("info_overlay"))
@@ -94,6 +103,25 @@ pub fn show(ctx: &Context, info: &MediaInfo, is_hdr: bool) {
                             };
                             row(ui, &s.codec, &truncate(&label, 22));
                         }
+                    }
+
+                    // Stats runtime
+                    if let Some(s) = stats {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("⚡  Runtime").color(ACCENT).size(11.0));
+                        let cs_name = match s.color_space {
+                            0 => "BT.601",
+                            2 => "BT.2020",
+                            _ => "BT.709",
+                        };
+                        row(ui, "Espace couleur (actif)", cs_name);
+                        row(ui, "Vitesse", &format!("{}×", s.speed));
+                        row(ui, "Format image", s.aspect_label);
+                        row(ui, "Répétition", s.loop_label);
+                        if s.buffered_secs > 0.0 {
+                            row(ui, "Buffer audio", &format!("{:.2} s", s.buffered_secs));
+                        }
+                        row(ui, "Position clock", &format!("{:.3} s", s.clock_secs));
                     }
 
                     ui.add_space(4.0);

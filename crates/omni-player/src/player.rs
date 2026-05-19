@@ -296,4 +296,12 @@ impl Player {
     pub fn effective_volume(&self) -> f32 {
         if self.muted { 0.0 } else { self.volume }
     }
+
+    pub fn set_speed(&mut self, speed: f32) {
+        self.clock.set_speed(speed);
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.clock.speed()
+    }
 }

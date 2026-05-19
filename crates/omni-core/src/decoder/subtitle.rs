@@ -1,5 +1,10 @@
 use anyhow::Result;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::time::Duration;
+
+static RE_HTML: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
+static RE_ASS:  Lazy<Regex> = Lazy::new(|| Regex::new(r"\{[^}]*\}").unwrap());
 
 /// Événement subtitle avec texte formaté (ASS/SRT normalisé).
 #[derive(Debug, Clone)]
@@ -100,11 +105,9 @@ fn parse_ass_timecode(s: &str) -> Option<Duration> {
 }
 
 fn strip_html_tags(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    re.replace_all(s, "").to_string()
+    RE_HTML.replace_all(s, "").to_string()
 }
 
 fn strip_ass_tags(s: &str) -> String {
-    let re = regex::Regex::new(r"\{[^}]*\}").unwrap();
-    re.replace_all(s, "").to_string()
+    RE_ASS.replace_all(s, "").to_string()
 }

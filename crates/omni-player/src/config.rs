@@ -1,20 +1,62 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum AspectMode {
+    #[default]
+    Fit,
+    Fill,
+    Stretch,
+}
+
+impl AspectMode {
+    pub fn next(&self) -> Self {
+        match self { Self::Fit => Self::Fill, Self::Fill => Self::Stretch, Self::Stretch => Self::Fit }
+    }
+    pub fn label(&self) -> &'static str {
+        match self { Self::Fit => "Fit", Self::Fill => "Fill", Self::Stretch => "Stretch" }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum LoopMode {
+    #[default]
+    Off,
+    One,
+    All,
+}
+
+impl LoopMode {
+    pub fn next(&self) -> Self {
+        match self { Self::Off => Self::One, Self::One => Self::All, Self::All => Self::Off }
+    }
+    pub fn label(&self) -> &'static str {
+        match self { Self::Off => "Off", Self::One => "×1", Self::All => "All" }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub window_width:        u32,
     pub window_height:       u32,
     pub volume:              f32,
-    pub hw_accel:            String,      // "auto" | "dxva2" | "d3d11va" | "none"
-    pub subtitle_lang:       String,      // "fr", "en", ...
-    pub tonemap_mode:        u32,         // 0=Reinhard 1=ACES 2=Hable
-    pub max_luminance:       f32,         // nits
+    pub hw_accel:            String,
+    pub subtitle_lang:       String,
+    pub tonemap_mode:        u32,
+    pub max_luminance:       f32,
     pub subtitle_service_port: u16,
     pub media_indexer_port:    u16,
     pub recent_files:        Vec<String>,
-    pub media_library:       Vec<String>, // dossiers indexés
+    pub media_library:       Vec<String>,
+    #[serde(default)]
+    pub aspect_mode:         AspectMode,
+    #[serde(default)]
+    pub loop_mode:           LoopMode,
+    #[serde(default = "default_speed")]
+    pub playback_speed:      f32,
 }
+
+fn default_speed() -> f32 { 1.0 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -30,6 +72,9 @@ impl Default for AppConfig {
             media_indexer_port:    18081,
             recent_files:          Vec::new(),
             media_library:         Vec::new(),
+            aspect_mode:           AspectMode::Fit,
+            loop_mode:             LoopMode::Off,
+            playback_speed:        1.0,
         }
     }
 }
