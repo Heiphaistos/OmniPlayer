@@ -109,13 +109,19 @@ pub fn probe_file(path: &Path) -> Result<MediaInfo> {
                 }
             }
             ffmpeg::media::Type::Audio => {
+                let audio_dec = ffmpeg::codec::context::Context::from_parameters(params)
+                    .and_then(|c| c.decoder().audio())
+                    .ok();
+                let channels    = audio_dec.as_ref().map(|d| d.channels() as u16).unwrap_or(0);
+                let sample_rate = audio_dec.as_ref().map(|d| d.rate()).unwrap_or(0);
+                let bit_rate    = audio_dec.as_ref().map(|d| d.bit_rate() as i64).unwrap_or(0);
                 audio_streams.push(AudioStreamInfo {
-                    index:       stream.index(),
-                    codec_name:  codec_name.clone(),
-                    channels:    0, // rempli si decoder dispo
-                    sample_rate: 0,
-                    bit_rate:    0,
-                    language:    lang,
+                    index: stream.index(),
+                    codec_name: codec_name.clone(),
+                    channels,
+                    sample_rate,
+                    bit_rate,
+                    language: lang,
                 });
             }
             ffmpeg::media::Type::Subtitle => {

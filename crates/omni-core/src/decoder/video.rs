@@ -24,6 +24,10 @@ pub struct VideoDecoder {
     scaler:      Option<SwsContext>,
     target_fmt:  ffmpeg::format::Pixel,
     time_base:   f64,
+    // Tracks source properties to detect mid-stream changes requiring scaler rebuild.
+    scaler_src_w:   u32,
+    scaler_src_h:   u32,
+    scaler_src_fmt: Option<ffmpeg::format::Pixel>,
 }
 
 impl VideoDecoder {
@@ -33,6 +37,9 @@ impl VideoDecoder {
             scaler: None,
             target_fmt: ffmpeg::format::Pixel::YUV420P,
             time_base,
+            scaler_src_w:   0,
+            scaler_src_h:   0,
+            scaler_src_fmt: None,
         })
     }
 
@@ -64,19 +71,31 @@ impl VideoDecoder {
 
         // Conversion de format si nécessaire (ex: yuv420p10le → yuv420p)
         let frame = if raw.format() != self.target_fmt {
-            let scaler = self.scaler.get_or_insert_with(|| {
-                SwsContext::get(
-                    raw.format(),
-                    raw.width(),
-                    raw.height(),
-                    self.target_fmt,
-                    raw.width(),
-                    raw.height(),
-                    Flags::BILINEAR,
-                )
-                .expect("création SwsContext")
-            });
+            // Rebuild scaler if source dimensions or pixel format changed mid-stream.
+            let needs_rebuild = self.scaler.is_none()
+                || self.scaler_src_w   != raw.width()
+                || self.scaler_src_h   != raw.height()
+                || self.scaler_src_fmt != Some(raw.format());
 
+            if needs_rebuild {
+                self.scaler = Some(
+                    SwsContext::get(
+                        raw.format(),
+                        raw.width(),
+                        raw.height(),
+                        self.target_fmt,
+                        raw.width(),
+                        raw.height(),
+                        Flags::BILINEAR,
+                    )
+                    .context("création SwsContext — format/dimensions incompatibles")?,
+                );
+                self.scaler_src_w   = raw.width();
+                self.scaler_src_h   = raw.height();
+                self.scaler_src_fmt = Some(raw.format());
+            }
+
+            let scaler = self.scaler.as_mut().expect("scaler vient d'être initialisé");
             let mut converted = ffmpeg::util::frame::video::Video::empty();
             scaler.run(&raw, &mut converted)?;
             converted

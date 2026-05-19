@@ -129,7 +129,7 @@ func PosterURL(path string) string {
 	return imageBase + path
 }
 
-func (c *Client) get(endpoint string, params url.Values, dest interface{}) error {
+func (c *Client) get(endpoint string, params url.Values, dest any) error {
 	rawURL := tmdbBase + endpoint + "?" + params.Encode()
 	resp, err := c.http.Get(rawURL)
 	if err != nil {

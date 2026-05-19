@@ -32,7 +32,16 @@ pub fn run_demuxer(
     let _ = event_tx.send(PipelineEvent::MetadataReady(Box::new(info)));
     let _ = event_tx.send(PipelineEvent::DurationKnown(duration));
 
-    let mut ctx = DecodeContext::open(path, Some("dxva2"))?;
+    // Prefer d3d11va (modern API) on Windows; fall back to dxva2, then software.
+    #[cfg(windows)]
+    let preferred_hw = {
+        use crate::hw_accel::windows::win::is_d3d11va_available;
+        if is_d3d11va_available() { Some("d3d11va") } else { Some("dxva2") }
+    };
+    #[cfg(not(windows))]
+    let preferred_hw: Option<&str> = None;
+
+    let mut ctx = DecodeContext::open(path, preferred_hw)?;
 
     let v_idx = ctx.video_stream_idx;
     let a_idx = ctx.audio_stream_idx;

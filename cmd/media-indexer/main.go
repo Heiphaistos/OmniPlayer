@@ -32,7 +32,7 @@ var (
 
 // Extensions vidéo supportées (doit correspondre à SUPPORTED_EXTENSIONS côté Rust)
 var mediaExts = map[string]bool{
-	".mp4":".mp4" == ".mp4", ".mkv": true, ".avi": true, ".mov": true,
+	".mp4": true, ".mkv": true, ".avi": true, ".mov": true,
 	".wmv": true, ".flv": true, ".webm": true, ".ts": true, ".m2ts": true,
 	".mpg": true, ".mpeg": true, ".m4v": true, ".3gp": true, ".ogv": true,
 	".rm": true, ".rmvb": true, ".divx": true, ".vob": true, ".f4v": true,
@@ -78,6 +78,8 @@ func handleLibrary(w http.ResponseWriter, r *http.Request) {
 
 // POST /index  body: {"dirs":["C:\\Films","D:\\Séries"]}
 func handleReindex(w http.ResponseWriter, r *http.Request) {
+	// Guard against oversized request bodies (max 64 KB for a path list).
+	r.Body = http.MaxBytesReader(w, r.Body, 65536)
 	var req struct {
 		Dirs []string `json:"dirs"`
 	}

@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	baseURL   = "https://api.opensubtitles.com/api/v1"
-	userAgent = "OmniPlayer v1.0"
+	baseURL        = "https://api.opensubtitles.com/api/v1"
+	userAgent      = "OmniPlayer v1.2"
+	maxDownloadSize = 10 * 1024 * 1024 // 10 MB — subtitle files are never larger
 )
 
 // Client OpenSubtitles.
@@ -124,8 +125,11 @@ func (c *Client) Download(fileID int, destDir string) (string, error) {
 	}
 
 	// Demande le lien de téléchargement
-	body := strings.NewReader(fmt.Sprintf(`{"file_id":%d}`, fileID))
-	req, err := http.NewRequest("POST", baseURL+"/download", body)
+	payload, err := json.Marshal(map[string]int{"file_id": fileID})
+	if err != nil {
+		return "", fmt.Errorf("marshal download request: %w", err)
+	}
+	req, err := http.NewRequest("POST", baseURL+"/download", strings.NewReader(string(payload)))
 	if err != nil {
 		return "", err
 	}
@@ -159,7 +163,8 @@ func (c *Client) Download(fileID int, destDir string) (string, error) {
 	}
 	defer out.Close()
 
-	if _, err := io.Copy(out, fileResp.Body); err != nil {
+	// Limit read to maxDownloadSize to prevent unbounded memory/disk consumption.
+	if _, err := io.Copy(out, io.LimitReader(fileResp.Body, maxDownloadSize)); err != nil {
 		return "", err
 	}
 

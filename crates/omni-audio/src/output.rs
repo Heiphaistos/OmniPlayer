@@ -139,17 +139,19 @@ fn build_stream(
             let vol_w  = volume.clone();
             let pau_w  = paused.clone();
             let rl_w   = ring_level.clone();
+            // Pre-allocated scratch: grows to max callback size, never reallocates after warm-up.
+            let mut scratch = Vec::<f32>::new();
             device.build_output_stream(cfg, move |data: &mut [i16], _| {
                 if pau_w.load(Ordering::Relaxed) { data.fill(0); return; }
-                let mut tmp = vec![0f32; data.len()];
+                scratch.resize(data.len(), 0.0);
                 let mut c = cons_w.lock();
-                let n = c.pop_slice(&mut tmp);
+                let n = c.pop_slice(&mut scratch);
                 let remaining = c.len();
                 drop(c);
                 rl_w.store(remaining as u64, Ordering::Release);
-                if n < tmp.len() { tmp[n..].fill(0.0); }
+                if n < scratch.len() { scratch[n..].fill(0.0); }
                 let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
-                for (o, s) in data.iter_mut().zip(tmp.iter()) {
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
                     *o = ((s * vol).clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                 }
             }, err_fn, None)?
@@ -159,17 +161,19 @@ fn build_stream(
             let vol_w  = volume.clone();
             let pau_w  = paused.clone();
             let rl_w   = ring_level.clone();
+            // Pre-allocated scratch: grows to max callback size, never reallocates after warm-up.
+            let mut scratch = Vec::<f32>::new();
             device.build_output_stream(cfg, move |data: &mut [u16], _| {
                 if pau_w.load(Ordering::Relaxed) { data.fill(32768); return; }
-                let mut tmp = vec![0f32; data.len()];
+                scratch.resize(data.len(), 0.0);
                 let mut c = cons_w.lock();
-                let n = c.pop_slice(&mut tmp);
+                let n = c.pop_slice(&mut scratch);
                 let remaining = c.len();
                 drop(c);
                 rl_w.store(remaining as u64, Ordering::Release);
-                if n < tmp.len() { tmp[n..].fill(0.0); }
+                if n < scratch.len() { scratch[n..].fill(0.0); }
                 let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
-                for (o, s) in data.iter_mut().zip(tmp.iter()) {
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
                     *o = (((s * vol).clamp(-1.0, 1.0) + 1.0) * 0.5 * u16::MAX as f32) as u16;
                 }
             }, err_fn, None)?

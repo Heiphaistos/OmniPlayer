@@ -68,6 +68,8 @@ func (b *Bridge) handleSubtitleSearch(w http.ResponseWriter, r *http.Request) {
 
 // POST /subtitles/download  body: {"file_id":123456,"dest_dir":"/tmp"}
 func (b *Bridge) handleSubtitleDownload(w http.ResponseWriter, r *http.Request) {
+	// Guard against oversized request bodies (max 4 KB for this small JSON payload).
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req struct {
 		FileID  int    `json:"file_id"`
 		DestDir string `json:"dest_dir"`
@@ -117,7 +119,7 @@ func (b *Bridge) handleTVSearch(w http.ResponseWriter, r *http.Request) {
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
-func writeJSON(w http.ResponseWriter, code int, body interface{}) {
+func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)

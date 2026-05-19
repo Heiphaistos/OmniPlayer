@@ -35,14 +35,14 @@ impl HwAccelContext {
     /// Applique le contexte HW au codec avant ouverture.
     pub fn apply_to_codec(&self, ctx: &mut ffmpeg::codec::context::Context) {
         match self.kind {
-            HwKind::Dxva2 => {
-                // ffmpeg-next expose hwaccel via options dict
+            // Enable frame-level parallelism for all HW-accelerated paths.
+            HwKind::Dxva2 | HwKind::D3D11Va | HwKind::Cuda => {
                 ctx.set_threading(ffmpeg::codec::threading::Config {
                     kind:  ffmpeg::codec::threading::Type::Frame,
                     count: 4,
                 });
             }
-            HwKind::D3D11Va | HwKind::Cuda | HwKind::None => {}
+            HwKind::None => {}
         }
     }
 }
