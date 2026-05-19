@@ -25,6 +25,10 @@ desktop.ini
 *.swp
 *~
 
+# Release artifacts
+*.zip
+*.7z
+
 # Temp
 tmp/
 temp/
