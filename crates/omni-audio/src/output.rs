@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use omni_core::decoder::DecodedAudioFrame;
 use ringbuf::{HeapConsumer, HeapProducer, HeapRb};
 use std::sync::{
@@ -10,7 +10,7 @@ use std::sync::{
 
 use crate::resampler::AudioResampler;
 
-const RING_SECS: usize = 6;  // 6 s de buffer pour absorber les rafales
+const RING_SECS: usize = 8;  // 8 s de buffer pour absorber les rafales
 
 pub struct AudioEngine {
     _stream:     cpal::Stream,
@@ -45,8 +45,8 @@ impl AudioEngine {
         let paused     = Arc::new(AtomicBool::new(false));
         let ring_level = Arc::new(AtomicU64::new(0));
 
-        // Canal d'envoi vers le thread fill (grande capacité pour ne jamais bloquer)
-        let (tx, rx) = bounded::<DecodedAudioFrame>(512);
+        // Canal non-borné : push_frame ne bloque ni ne droppe jamais de frame
+        let (tx, rx) = unbounded::<DecodedAudioFrame>();
 
         {
             let ring_level2 = ring_level.clone();
@@ -83,10 +83,9 @@ impl AudioEngine {
         samples / (self.device_rate as f64 * self.channels as f64)
     }
 
-    /// Pousse un frame décodé de façon NON-BLOQUANTE.
-    /// Le canal (512 frames) absorbe les rafales; try_send évite de bloquer le thread principal.
+    /// Pousse un frame décodé — canal non-borné, jamais de drop.
     pub fn push_frame(&self, frame: DecodedAudioFrame) {
-        let _ = self.sender.try_send(frame);
+        let _ = self.sender.send(frame);
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -178,6 +177,111 @@ fn build_stream(
                 }
             }, err_fn, None)?
         }
+        cpal::SampleFormat::I32 => {
+            let cons_w = cons.clone();
+            let vol_w  = volume.clone();
+            let pau_w  = paused.clone();
+            let rl_w   = ring_level.clone();
+            let mut scratch = Vec::<f32>::new();
+            device.build_output_stream(cfg, move |data: &mut [i32], _| {
+                if pau_w.load(Ordering::Relaxed) { data.fill(0); return; }
+                scratch.resize(data.len(), 0.0);
+                let mut c = cons_w.lock();
+                let n = c.pop_slice(&mut scratch);
+                let remaining = c.len();
+                drop(c);
+                rl_w.store(remaining as u64, Ordering::Release);
+                if n < scratch.len() { scratch[n..].fill(0.0); }
+                let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
+                    *o = ((*s * vol).clamp(-1.0, 1.0) * i32::MAX as f32) as i32;
+                }
+            }, err_fn, None)?
+        }
+        cpal::SampleFormat::F64 => {
+            let cons_w = cons.clone();
+            let vol_w  = volume.clone();
+            let pau_w  = paused.clone();
+            let rl_w   = ring_level.clone();
+            let mut scratch = Vec::<f32>::new();
+            device.build_output_stream(cfg, move |data: &mut [f64], _| {
+                if pau_w.load(Ordering::Relaxed) { data.fill(0.0); return; }
+                scratch.resize(data.len(), 0.0);
+                let mut c = cons_w.lock();
+                let n = c.pop_slice(&mut scratch);
+                let remaining = c.len();
+                drop(c);
+                rl_w.store(remaining as u64, Ordering::Release);
+                if n < scratch.len() { scratch[n..].fill(0.0); }
+                let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
+                    *o = ((*s * vol).clamp(-1.0, 1.0)) as f64;
+                }
+            }, err_fn, None)?
+        }
+        cpal::SampleFormat::U32 => {
+            let cons_w = cons.clone();
+            let vol_w  = volume.clone();
+            let pau_w  = paused.clone();
+            let rl_w   = ring_level.clone();
+            let mut scratch = Vec::<f32>::new();
+            device.build_output_stream(cfg, move |data: &mut [u32], _| {
+                if pau_w.load(Ordering::Relaxed) { data.fill(u32::MAX / 2); return; }
+                scratch.resize(data.len(), 0.0);
+                let mut c = cons_w.lock();
+                let n = c.pop_slice(&mut scratch);
+                let remaining = c.len();
+                drop(c);
+                rl_w.store(remaining as u64, Ordering::Release);
+                if n < scratch.len() { scratch[n..].fill(0.0); }
+                let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
+                    *o = (((*s * vol).clamp(-1.0, 1.0) + 1.0) * 0.5 * u32::MAX as f32) as u32;
+                }
+            }, err_fn, None)?
+        }
+        cpal::SampleFormat::I8 => {
+            let cons_w = cons.clone();
+            let vol_w  = volume.clone();
+            let pau_w  = paused.clone();
+            let rl_w   = ring_level.clone();
+            let mut scratch = Vec::<f32>::new();
+            device.build_output_stream(cfg, move |data: &mut [i8], _| {
+                if pau_w.load(Ordering::Relaxed) { data.fill(0); return; }
+                scratch.resize(data.len(), 0.0);
+                let mut c = cons_w.lock();
+                let n = c.pop_slice(&mut scratch);
+                let remaining = c.len();
+                drop(c);
+                rl_w.store(remaining as u64, Ordering::Release);
+                if n < scratch.len() { scratch[n..].fill(0.0); }
+                let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
+                    *o = ((*s * vol).clamp(-1.0, 1.0) * i8::MAX as f32) as i8;
+                }
+            }, err_fn, None)?
+        }
+        cpal::SampleFormat::U8 => {
+            let cons_w = cons.clone();
+            let vol_w  = volume.clone();
+            let pau_w  = paused.clone();
+            let rl_w   = ring_level.clone();
+            let mut scratch = Vec::<f32>::new();
+            device.build_output_stream(cfg, move |data: &mut [u8], _| {
+                if pau_w.load(Ordering::Relaxed) { data.fill(128); return; }
+                scratch.resize(data.len(), 0.0);
+                let mut c = cons_w.lock();
+                let n = c.pop_slice(&mut scratch);
+                let remaining = c.len();
+                drop(c);
+                rl_w.store(remaining as u64, Ordering::Release);
+                if n < scratch.len() { scratch[n..].fill(0.0); }
+                let vol = f32::from_bits(vol_w.load(Ordering::Relaxed));
+                for (o, s) in data.iter_mut().zip(scratch.iter()) {
+                    *o = (((*s * vol).clamp(-1.0, 1.0) + 1.0) * 0.5 * u8::MAX as f32) as u8;
+                }
+            }, err_fn, None)?
+        }
         fmt => anyhow::bail!("format CPAL non géré: {fmt:?}"),
     };
 
@@ -194,15 +298,8 @@ fn fill_ring(
     ring_level:   Arc<AtomicU64>,
 ) {
     let mut resampler: Option<AudioResampler> = None;
-    // Backpressure : ne jamais dépasser 3 s dans le ring (capacity = 6 s)
-    let target_cap = device_rate as usize * dev_ch * 3;
 
     for frame in rx {
-        // Backpressure légère — libère du CPU pendant que CPAL consomme
-        while producer.len() >= target_cap {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-
         let in_ch   = frame.channels as usize;
         let in_rate = frame.sample_rate;
 

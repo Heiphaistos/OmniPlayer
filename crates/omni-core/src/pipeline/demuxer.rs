@@ -43,15 +43,22 @@ pub fn run_demuxer(
 
     let mut ctx = DecodeContext::open(path, preferred_hw)?;
 
+    // Indexe tous les flux audio disponibles pour le changement de piste
+    let all_audio_idx: Vec<usize> = ctx.format_ctx
+        .streams()
+        .filter(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
+        .map(|s| s.index())
+        .collect();
+
     let v_idx = ctx.video_stream_idx;
-    let a_idx = ctx.audio_stream_idx;
+    let mut a_idx = ctx.audio_stream_idx;
 
     let v_tb = v_idx.and_then(|i| {
         ctx.format_ctx.stream(i).map(|s| {
             s.time_base().numerator() as f64 / s.time_base().denominator().max(1) as f64
         })
     }).unwrap_or(0.0);
-    let a_tb = a_idx.and_then(|i| {
+    let mut a_tb = a_idx.and_then(|i| {
         ctx.format_ctx.stream(i).map(|s| {
             s.time_base().numerator() as f64 / s.time_base().denominator().max(1) as f64
         })
@@ -94,6 +101,24 @@ pub fn run_demuxer(
                     audio_dec = a_idx
                         .and_then(|_| ctx.build_audio_decoder().ok())
                         .and_then(|d| AudioDecoder::new(d, a_tb).ok());
+                }
+                PipelineCommand::SelectAudioTrack(track) => {
+                    if let Some(&new_idx) = all_audio_idx.get(track) {
+                        // Flush et reconstruit le décodeur audio pour la nouvelle piste
+                        if let Some(dec) = &mut audio_dec {
+                            let _ = dec.send_eof();
+                            while dec.receive_frame().ok().flatten().is_some() {}
+                        }
+                        a_tb = ctx.format_ctx.stream(new_idx)
+                            .map(|s| s.time_base().numerator() as f64 / s.time_base().denominator().max(1) as f64)
+                            .unwrap_or(0.0);
+                        a_idx = Some(new_idx);
+                        ctx.audio_stream_idx = a_idx;
+                        audio_dec = ctx.build_audio_decoder_for(new_idx)
+                            .ok()
+                            .and_then(|d| AudioDecoder::new(d, a_tb).ok());
+                        log::info!("audio track switched → stream {new_idx}");
+                    }
                 }
                 _ => {}
             }

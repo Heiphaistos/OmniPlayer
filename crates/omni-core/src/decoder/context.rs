@@ -77,6 +77,11 @@ impl DecodeContext {
         let stream_idx = self
             .audio_stream_idx
             .context("aucun flux audio trouvé")?;
+        self.build_audio_decoder_for(stream_idx)
+    }
+
+    /// Construit un décodeur audio pour un flux arbitraire (changement de piste).
+    pub fn build_audio_decoder_for(&self, stream_idx: usize) -> Result<ffmpeg::codec::decoder::Audio> {
         let stream = self
             .format_ctx
             .stream(stream_idx)
