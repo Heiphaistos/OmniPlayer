@@ -129,11 +129,9 @@ pub fn run_demuxer(
             continue;
         }
 
-        // Backpressure vidéo uniquement — l'audio doit TOUJOURS avancer
-        if video_tx.is_full() {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            continue;
-        }
+        // NOTE : pas de check video_tx.is_full() ici — le faire bloquerait l'audio et
+        // empêcherait le premier PositionChanged d'arriver, laissant le player en Loading
+        // indéfiniment (deadlock). Le try_send ci-dessous gère l'overflow silencieusement.
 
         let mut packet = ffmpeg::Packet::empty();
         match packet.read(&mut ctx.format_ctx) {
@@ -155,7 +153,9 @@ pub fn run_demuxer(
             if let Some(dec) = &mut video_dec {
                 let _ = dec.send_packet(&packet);
                 while let Ok(Some(frame)) = dec.receive_frame() {
-                    // Vidéo : on peut sauter des frames si la queue est pleine
+                    // PositionChanged depuis la vidéo aussi : garantit Loading→Playing
+                    // même si l'audio n'a pas encore produit de frame (ex: début I-frame lourd)
+                    let _ = event_tx.try_send(PipelineEvent::PositionChanged(frame.pts_secs));
                     let _ = video_tx.try_send(frame);
                 }
             }
