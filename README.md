@@ -1,6 +1,6 @@
 # OmniPlayer — Lecteur Multimédia Universel
 
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.3.1-blue)
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust)
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go)
 ![License](https://img.shields.io/badge/licence-MIT-green)
