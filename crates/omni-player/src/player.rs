@@ -275,6 +275,11 @@ impl Player {
                     self.chapters   = info.chapters.clone();
                     self.media_info = Some(*info);
                 }
+                PipelineEvent::SubtitleLine(text, _start, _end) => {
+                    // Sous-titre décodé depuis le conteneur — affichage immédiat
+                    // (le timing est géré côté demuxer via la position du paquet)
+                    self.current_subtitle = if text.is_empty() { None } else { Some(text) };
+                }
             }
         }
 

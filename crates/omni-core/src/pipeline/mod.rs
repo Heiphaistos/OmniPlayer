@@ -28,6 +28,8 @@ pub enum PipelineEvent {
     EndOfStream,
     Error(String),
     MetadataReady(Box<crate::probe::MediaInfo>),
+    /// Ligne de sous-titre intégrée (texte, pts_start, pts_end en secondes).
+    SubtitleLine(String, f64, f64),
 }
 
 /// Capacité max des queues de frames (frames buffered).

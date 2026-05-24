@@ -50,8 +50,17 @@ pub fn run_demuxer(
         .map(|s| s.index())
         .collect();
 
+    // Indexe tous les flux subtitle disponibles pour le changement de piste
+    let all_sub_idx: Vec<usize> = ctx.format_ctx
+        .streams()
+        .filter(|s| s.parameters().medium() == ffmpeg::media::Type::Subtitle)
+        .map(|s| s.index())
+        .collect();
+
     let v_idx = ctx.video_stream_idx;
     let mut a_idx = ctx.audio_stream_idx;
+    // Index du flux subtitle actif (None = sous-titres intégrés désactivés)
+    let mut s_idx: Option<usize> = None;
 
     let v_tb = v_idx.and_then(|i| {
         ctx.format_ctx.stream(i).map(|s| {
@@ -73,6 +82,10 @@ pub fn run_demuxer(
         .map(|_| ctx.build_audio_decoder().map(|d| AudioDecoder::new(d, a_tb)))
         .transpose()?
         .and_then(|r| r.ok());
+
+    // Décodeur subtitle intégré — construit à la demande lors de SelectSubtitleTrack
+    let mut subtitle_dec: Option<ffmpeg::codec::decoder::Subtitle> = None;
+    let mut s_tb = 0.0f64;
 
     let mut paused = false;
 
@@ -118,6 +131,39 @@ pub fn run_demuxer(
                             .ok()
                             .and_then(|d| AudioDecoder::new(d, a_tb).ok());
                         log::info!("audio track switched → stream {new_idx}");
+                    }
+                }
+                PipelineCommand::SelectSubtitleTrack(track_opt) => {
+                    match track_opt {
+                        None => {
+                            // Désactive les sous-titres intégrés
+                            s_idx = None;
+                            subtitle_dec = None;
+                            log::info!("embedded subtitles disabled");
+                        }
+                        Some(track) => {
+                            if let Some(&new_idx) = all_sub_idx.get(track) {
+                                s_idx = Some(new_idx);
+                                // Construit le décodeur subtitle pour la nouvelle piste
+                                subtitle_dec = None;
+                                if let Some(st) = ctx.format_ctx.stream(new_idx) {
+                                    s_tb = st.time_base().numerator() as f64
+                                        / st.time_base().denominator().max(1) as f64;
+                                    if let Ok(codec_ctx) = ffmpeg::codec::context::Context::from_parameters(
+                                        st.parameters()
+                                    ) {
+                                        subtitle_dec = codec_ctx.decoder().subtitle().ok();
+                                    }
+                                }
+                                if subtitle_dec.is_some() {
+                                    log::info!("subtitle track switched → stream {new_idx}");
+                                } else {
+                                    log::warn!("subtitle track {new_idx}: codec init failed (bitmap/PGS not supported)");
+                                }
+                            } else {
+                                log::warn!("subtitle track {track} out of range (max {})", all_sub_idx.len());
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -172,10 +218,86 @@ pub fn run_demuxer(
                     );
                 }
             }
+        } else if s_idx.is_some() && Some(stream_idx) == s_idx {
+            // Décode les paquets de sous-titres intégrés via le décodeur initialisé
+            if let Some(dec) = &mut subtitle_dec {
+                let pts_start = packet.pts().unwrap_or(0).max(0) as f64 * s_tb;
+                let duration_secs = packet.duration() as f64 * s_tb;
+                let pts_end = pts_start + duration_secs.max(1.0);
+
+                let mut subtitle = ffmpeg::Subtitle::new();
+                if dec.decode(&packet, &mut subtitle) == Ok(true) {
+                    let text = collect_subtitle_text(&subtitle);
+                    if !text.is_empty() {
+                        let _ = event_tx.try_send(
+                            PipelineEvent::SubtitleLine(text, pts_start, pts_end)
+                        );
+                    }
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+/// Extrait le texte brut d'un paquet subtitle ffmpeg (SRT/ASS/WebVTT/HDMV-PGS partiellement).
+fn collect_subtitle_text(subtitle: &ffmpeg::Subtitle) -> String {
+    use ffmpeg::subtitle::Rect;
+    let mut parts: Vec<String> = Vec::new();
+    for rect in subtitle.rects() {
+        match rect {
+            Rect::Text(t) => {
+                let raw = t.get();
+                // Supprime les balises HTML basiques (<i>, <b>, etc.) souvent présentes en SRT
+                let clean = strip_basic_tags(raw);
+                if !clean.trim().is_empty() {
+                    parts.push(clean.trim().to_string());
+                }
+            }
+            Rect::Ass(a) => {
+                // Ligne ASS : format "Layer,Start,End,Style,Name,MLeft,MRight,MVert,Effect,Text"
+                let line = a.get();
+                let text = line.splitn(10, ',').nth(9).unwrap_or("").trim().to_string();
+                // Supprime les overrides ASS {…}
+                let clean = strip_ass_overrides(&text);
+                if !clean.trim().is_empty() {
+                    parts.push(clean.trim().to_string());
+                }
+            }
+            _ => {} // Rect::Bitmap (PGS/VOBSUB) — pas de texte extractible
+        }
+    }
+    parts.join("\n")
+}
+
+fn strip_basic_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut inside = false;
+    for c in s.chars() {
+        match c {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn strip_ass_overrides(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    // Remplace les sauts de ligne ASS \N et \n
+    out.replace("\\N", "\n").replace("\\n", "\n")
 }
 
 fn flush_decoders(

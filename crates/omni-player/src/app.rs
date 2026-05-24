@@ -57,7 +57,18 @@ impl OmniApp {
             .map_err(|e| log::error!("AudioEngine: {e}")).ok();
 
         let svc = ServicesClient::new(config.subtitle_service_port, config.media_indexer_port);
-        let services = if svc.is_subtitle_service_up() { Some(svc) } else { None };
+        let (services, initial_osd) = if svc.is_subtitle_service_up() {
+            (Some(svc), None)
+        } else {
+            log::warn!(
+                "Services sous-titres/indexeur non disponibles (ports {}/{}). \
+                 Lancez launch.bat pour les activer.",
+                config.subtitle_service_port,
+                config.media_indexer_port,
+            );
+            let msg = "Services sous-titres non disponibles — lancez launch.bat pour les activer";
+            (None, Some(Osd { text: msg.to_string(), expires_at: 0.0 }))
+        };
 
         Self {
             player: Player::new(), audio, config,
@@ -67,7 +78,7 @@ impl OmniApp {
             url_input: String::new(), is_fullscreen: false,
             playlist_items: Vec::new(), playlist_idx: None, seek_request: None,
             video_frame: Arc::new(Mutex::new(None)),
-            osd: None, services,
+            osd: initial_osd, services,
             last_mouse_move: 0.0,
             image_viewer: ImageViewer::default(),
             image_texture: None,

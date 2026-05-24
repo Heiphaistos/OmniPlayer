@@ -38,9 +38,42 @@ fn main() -> Result<()> {
 }
 
 fn load_icon() -> Arc<egui::IconData> {
-    Arc::new(egui::IconData {
-        rgba:   vec![0u8; 32 * 32 * 4],
-        width:  32,
-        height: 32,
-    })
+    // Génère procéduralement une icône 32×32 dégradé bleu (#0080FF) → violet (#8000FF).
+    // Fond circulaire sombre + dégradé horizontal sur les pixels intérieurs.
+    const SIZE: u32 = 32;
+    let cx = SIZE as f32 / 2.0;
+    let cy = SIZE as f32 / 2.0;
+    let r = cx - 1.0;
+
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if dist <= r {
+                // Dégradé horizontal bleu → violet
+                let t = x as f32 / (SIZE - 1) as f32;
+                let red   = (t * 128.0) as u8;
+                let green = 0u8;
+                let blue  = 255u8;
+                // Légère vignette sur les bords du cercle
+                let alpha = if dist > r - 1.5 {
+                    ((r - dist) * 170.0).clamp(0.0, 255.0) as u8
+                } else {
+                    255u8
+                };
+                rgba.push(red);
+                rgba.push(green);
+                rgba.push(blue);
+                rgba.push(alpha);
+            } else {
+                // Hors du cercle → transparent
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+
+    Arc::new(egui::IconData { rgba, width: SIZE, height: SIZE })
 }
