@@ -23,7 +23,7 @@ jobs:
           - language: go
             build-mode: autobuild
           - language: rust
-            build-mode: autobuild
+            build-mode: none
     steps:
       - uses: actions/checkout@v4
 
