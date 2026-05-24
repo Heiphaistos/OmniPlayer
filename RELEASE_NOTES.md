@@ -2,6 +2,16 @@
 
 ---
 
+## v1.3.1 (2026-05-24) — Correctifs
+
+### Corrections
+
+- **[CRITIQUE] Sous-titres intégrés MKV/MP4 fonctionnels** — `PipelineCommand::SelectSubtitleTrack` était silencieusement ignoré (`_ => {}`). Désormais, le demuxer crée un décodeur de sous-titres FFmpeg dédié (`ffmpeg::codec::decoder::Subtitle`), filtre les paquets du stream sélectionné, extrait le texte des rects `Text` et `Ass` via les helpers `collect_subtitle_text` / `strip_ass_overrides`, et émet `PipelineEvent::SubtitleLine(texte, pts_début, pts_fin)`. Les sous-titres PGS/bitmap restent non supportés (ignorés proprement). Nouveau variant `SubtitleLine` dans l'enum `PipelineEvent`.
+- **Icône application** — `load_icon()` génère maintenant un cercle 32×32 avec dégradé horizontal bleu (#0080FF) → violet (#8000FF) et fond transparent, visible dans la barre des tâches Windows. Remplace les 32×32 pixels noirs précédents.
+- **Services Go silencieux** — si le service sous-titres ne répond pas au health check au démarrage, un `log::warn!` est émis et un message OSD s'affiche 2,5 secondes : *"Services sous-titres non disponibles — lancez launch.bat pour les activer"*. L'absence de services ne passe plus inaperçue.
+
+---
+
 ## v1.3.0 (2026-05-24)
 
 ### Nouvelles fonctionnalités
