@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"omniplayer/pkg/metadata"
 	"omniplayer/pkg/subtitles"
@@ -79,7 +82,14 @@ func (b *Bridge) handleSubtitleDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	path, err := b.subtitleClient.Download(req.FileID, req.DestDir)
+	// H8 — valider dest_dir pour prévenir la traversée de répertoires
+	safeDir, err := validateDestDir(req.DestDir)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+
+	path, err := b.subtitleClient.Download(req.FileID, safeDir)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -118,6 +128,28 @@ func (b *Bridge) handleTVSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
+
+// validateDestDir résout le chemin absolu et s'assure qu'il reste dans le home de l'utilisateur.
+// Empêche les traversées de répertoires via ".." ou chemins symboliques.
+func validateDestDir(destDir string) (string, error) {
+	abs, err := filepath.Abs(destDir)
+	if err != nil {
+		return "", fmt.Errorf("chemin invalide: %w", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("impossible de déterminer le home: %w", err)
+	}
+
+	// S'assurer que le séparateur final est présent pour éviter les faux positifs
+	// (ex: home=/home/user, abs=/home/username ne doit pas matcher)
+	if !strings.HasPrefix(abs, home+string(filepath.Separator)) && abs != home {
+		return "", fmt.Errorf("dossier de destination non autorisé: %s", abs)
+	}
+
+	return abs, nil
+}
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")

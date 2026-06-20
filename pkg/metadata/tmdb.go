@@ -9,11 +9,24 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
 const tmdbBase = "https://api.themoviedb.org/3"
 const imageBase = "https://image.tmdb.org/t/p/w500"
+
+// titleRegex valide les titres de films/séries pour prévenir les injections et abus SSRF.
+// Autorise les caractères alphanumériques, accents courants et ponctuation de titre.
+var titleRegex = regexp.MustCompile(`^[a-zA-ZÀ-ÿ0-9\s\-\.',:!?()\[\]]{1,200}$`)
+
+// validateTitle retourne une erreur si le titre ne correspond pas au format attendu.
+func validateTitle(title string) error {
+	if !titleRegex.MatchString(title) {
+		return fmt.Errorf("titre invalide: %q", title)
+	}
+	return nil
+}
 
 // Client TMDB.
 type Client struct {
@@ -71,10 +84,14 @@ type searchTVResp struct {
 
 // SearchMovie cherche un film par titre.
 func (c *Client) SearchMovie(title string) ([]MovieInfo, error) {
+	// H9 — valider le titre avant de l'injecter dans la requête TMDB
+	if err := validateTitle(title); err != nil {
+		return nil, err
+	}
 	q := url.Values{
 		"api_key":       {c.apiKey},
 		"language":      {c.lang},
-		"query":         {title},
+		"query":         {url.QueryEscape(title)},
 		"include_adult": {"false"},
 	}
 	var resp searchMovieResp
@@ -86,10 +103,14 @@ func (c *Client) SearchMovie(title string) ([]MovieInfo, error) {
 
 // SearchTV cherche une série TV par titre.
 func (c *Client) SearchTV(title string) ([]TVInfo, error) {
+	// H9 — valider le titre avant de l'injecter dans la requête TMDB
+	if err := validateTitle(title); err != nil {
+		return nil, err
+	}
 	q := url.Values{
 		"api_key":  {c.apiKey},
 		"language": {c.lang},
-		"query":    {title},
+		"query":    {url.QueryEscape(title)},
 	}
 	var resp searchTVResp
 	if err := c.get("/search/tv", q, &resp); err != nil {
