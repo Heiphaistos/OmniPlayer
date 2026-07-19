@@ -42,7 +42,15 @@ impl AudioEngine {
         log::info!("audio device: {:?} — {:?}", device.name(), config);
 
         let device_rate = config.sample_rate().0;
-        let channels    = config.channels() as usize;
+        // Le pipeline downmixe TOUJOURS vers stéréo (fill_ring::downmix_to_stereo) —
+        // le stream CPAL doit donc être ouvert en 2 canaux, jamais le nombre natif
+        // du device. Sur un PC dont le device par défaut est en 5.1/7.1 (courant sur
+        // desktop même sans enceintes surround), ignorer ça faisait lire le ring
+        // (rempli en 2 canaux) comme des trames à N canaux : le ring se vidait N/2×
+        // trop vite → lecture accélérée en continu, indépendante de toute action
+        // utilisateur (pause/seek ne changeaient rien).
+        const OUTPUT_CHANNELS: usize = 2;
+        let channels    = OUTPUT_CHANNELS;
         let capacity    = device_rate as usize * channels * RING_SECS;
 
         let rb: HeapRb<f32> = HeapRb::new(capacity);
@@ -75,7 +83,9 @@ impl AudioEngine {
         let paused_w   = paused.clone();
         let rl_w       = ring_level.clone();
         let fmt        = config.sample_format();
-        let cfg: cpal::StreamConfig = config.into();
+        let mut cfg: cpal::StreamConfig = config.into();
+        // Force le stream lui-même en stéréo — voir commentaire OUTPUT_CHANNELS.
+        cfg.channels = OUTPUT_CHANNELS as u16;
 
         let stream = build_stream(&device, &cfg, fmt, consumer.clone(), vol_w, paused_w, rl_w)?;
         stream.play().context("play stream audio")?;
@@ -358,22 +368,39 @@ fn fill_ring(
             downmix_to_stereo(&frame.samples, in_ch)
         };
 
-        let final_samples = if in_rate == device_rate {
-            stereo
+        // Si le resampler manque ou échoue, ne JAMAIS jouer les échantillons bruts :
+        // playing at the wrong rate is audible as permanent pitch/speed-up
+        // ("chipmunk"), and looks unfixable to the user (pause/seek don't help since
+        // it's a per-frame code path, not a transient state). On saute le frame et on
+        // réessaie la construction au frame suivant plutôt que de jouer du son corrompu.
+        let final_samples: Option<Vec<f32>> = if in_rate == device_rate {
+            Some(stereo)
         } else {
             let out_ch = dev_ch.min(2);
             let needs_new = resampler.as_ref()
                 .map(|r| r.in_rate() != in_rate || r.out_rate() != device_rate)
                 .unwrap_or(true);
             if needs_new {
-                resampler = AudioResampler::new(in_rate, device_rate, out_ch).ok();
+                match AudioResampler::new(in_rate, device_rate, out_ch) {
+                    Ok(r) => resampler = Some(r),
+                    Err(e) => {
+                        resampler = None;
+                        log::error!("resampler {in_rate}Hz→{device_rate}Hz: {e:#} — frame audio ignoré (pas de lecture à mauvaise vitesse)");
+                    }
+                }
             }
-            if let Some(r) = &mut resampler {
-                r.process_interleaved(&stereo).unwrap_or(stereo)
-            } else {
-                stereo
+            match resampler.as_mut() {
+                Some(r) => match r.process_interleaved(&stereo) {
+                    Ok(out) => Some(out),
+                    Err(e) => {
+                        log::error!("resample: {e:#} — frame audio ignoré");
+                        None
+                    }
+                },
+                None => None,
             }
         };
+        let Some(final_samples) = final_samples else { continue };
 
         let pushed = producer.push_slice(&final_samples);
         // ring_level mis à jour ici aussi pour le fill ; CPAL met à jour côté consommation
