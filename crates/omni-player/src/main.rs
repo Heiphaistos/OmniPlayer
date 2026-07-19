@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod player;
+mod playlist_io;
 mod services;
 mod ui;
 mod video_callback;

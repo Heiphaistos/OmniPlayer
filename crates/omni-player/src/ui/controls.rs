@@ -248,7 +248,7 @@ fn seek_bar(
 ) -> Response {
     let h       = 12.0;
     let desired = Vec2::new(ui.available_width() - 16.0, h + 12.0);
-    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+    let (rect, mut resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
 
     let bar = egui::Rect::from_min_size(
         egui::pos2(rect.left() + 8.0, rect.center().y - h * 0.5),
@@ -259,6 +259,12 @@ fn seek_bar(
         if let Some(mp) = resp.interact_pointer_pos() {
             let t = ((mp.x - bar.left()) / bar.width()).clamp(0.0, 1.0);
             *pos = t as f64 * duration;
+            // allocate_exact_size() ne marque jamais `changed` tout seul (ce n'est
+            // pas un widget standard comme Slider) — sans ça, `.changed()() côté
+            // appelant reste faux en permanence et le clic ne déclenche jamais de
+            // vrai seek (seulement un redessin visuel du curseur pour cette frame,
+            // qui revenait à l'ancienne position la frame suivante).
+            resp.mark_changed();
         }
     }
 

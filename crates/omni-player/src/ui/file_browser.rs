@@ -567,9 +567,23 @@ fn detect_drives() -> Vec<String> {
     drives
 }
 
+/// Extensions qu'on sait *ne jamais* pouvoir ouvrir — tout le reste est tenté
+/// (FFmpeg sniffe le contenu réel, l'extension n'a pas d'importance pour lui ;
+/// filtrer par une liste blanche empêcherait d'ouvrir des fichiers valides avec
+/// une extension inhabituelle, renommée ou absente). Si FFmpeg échoue quand
+/// même, l'écran d'erreur existant s'affiche normalement.
+const NEVER_MEDIA_EXTENSIONS: &[&str] = &[
+    "exe", "dll", "sys", "msi", "bat", "cmd", "ps1", "sh",
+    "txt", "md", "log", "ini", "cfg", "json", "xml", "yaml", "yml",
+    "zip", "rar", "7z", "tar", "gz", "iso",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf",
+    "ttf", "otf", "woff", "woff2",
+    "db", "sqlite", "lnk",
+];
+
 fn is_media_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| SUPPORTED_EXTENSIONS.contains(&e.to_lowercase().as_str()))
-        .unwrap_or(false)
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    // Toujours ouvrable si dans la liste connue ; sinon ouvrable sauf si
+    // explicitement exclu (extension absente = ouvrable, FFmpeg sniffera).
+    SUPPORTED_EXTENSIONS.contains(&ext.as_str()) || !NEVER_MEDIA_EXTENSIONS.contains(&ext.as_str())
 }

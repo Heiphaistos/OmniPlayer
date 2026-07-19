@@ -2,15 +2,28 @@ use egui::{Color32, RichText, ScrollArea, Ui, Vec2};
 
 const ACCENT: Color32 = Color32::from_rgb(80, 140, 255);
 
+/// Action demandée par l'utilisateur via l'en-tête du panneau — l'app gère
+/// les dialogues fichiers (rfd / file browser interne) correspondants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaylistAction {
+    None,
+    Add,
+    Save,
+    Load,
+}
+
 /// Panneau playlist latéral — drag & drop, réorganisation, suppression.
+/// Retourne l'action d'en-tête demandée (Ajouter/Enregistrer/Charger).
 pub fn show<F>(
     ui:           &mut Ui,
     items:        &mut Vec<String>,
     current_idx:  &mut Option<usize>,
     mut on_play:  F,
-) where
+) -> PlaylistAction where
     F: FnMut(String),
 {
+    let mut action = PlaylistAction::None;
+
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
 
@@ -24,8 +37,16 @@ pub fn show<F>(
                     items.clear();
                     *current_idx = None;
                 }
-                if ui.small_button("+ Ajouter").clicked() {
-                    // Le file browser s'ouvre via l'app
+                if ui.small_button("+ Ajouter").on_hover_text("Ajouter un fichier").clicked() {
+                    action = PlaylistAction::Add;
+                }
+                if !items.is_empty()
+                    && ui.small_button("💾").on_hover_text("Enregistrer la playlist (.m3u8)").clicked()
+                {
+                    action = PlaylistAction::Save;
+                }
+                if ui.small_button("📂").on_hover_text("Charger une playlist (.m3u/.m3u8)").clicked() {
+                    action = PlaylistAction::Load;
                 }
             });
         });
@@ -119,6 +140,8 @@ pub fn show<F>(
             }
         }
     });
+
+    action
 }
 
 /// Accepte les fichiers glissés depuis l'explorateur Windows.

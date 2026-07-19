@@ -540,6 +540,47 @@ impl OmniApp {
             }
         }
     }
+
+    fn save_playlist(&mut self) {
+        if self.playlist_items.is_empty() { return; }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Playlist M3U8", &["m3u8"])
+            .set_file_name("playlist.m3u8")
+            .save_file()
+        {
+            match crate::playlist_io::save_m3u(&self.playlist_items, &path) {
+                Ok(()) => self.set_osd(format!("Playlist enregistrée : {}",
+                    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())),
+                Err(e) => {
+                    log::error!("save_playlist: {e:#}");
+                    self.set_osd("Échec de l'enregistrement de la playlist");
+                }
+            }
+        }
+    }
+
+    fn load_playlist(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Playlist", &["m3u", "m3u8"])
+            .pick_file()
+        {
+            match crate::playlist_io::load_m3u(&path) {
+                Ok(items) if items.is_empty() => {
+                    self.set_osd("Playlist vide ou fichiers introuvables");
+                }
+                Ok(items) => {
+                    let count = items.len();
+                    self.playlist_items = items;
+                    self.playlist_idx = None;
+                    self.set_osd(format!("Playlist chargée : {count} élément(s)"));
+                }
+                Err(e) => {
+                    log::error!("load_playlist: {e:#}");
+                    self.set_osd("Échec du chargement de la playlist");
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for OmniApp {
@@ -664,16 +705,23 @@ impl eframe::App for OmniApp {
         // ── Playlist ──────────────────────────────────────────────────────
         if self.show_playlist {
             let mut play_path: Option<String> = None;
+            let mut panel_action = playlist::PlaylistAction::None;
             egui::SidePanel::right("playlist_panel")
                 .resizable(true).default_width(270.0)
                 .frame(egui::Frame::new()
                     .fill(egui::Color32::from_rgb(12, 12, 20))
                     .inner_margin(egui::Margin::same(8)))
                 .show(ctx, |ui| {
-                    playlist::show(ui, &mut self.playlist_items, &mut self.playlist_idx,
+                    panel_action = playlist::show(ui, &mut self.playlist_items, &mut self.playlist_idx,
                         |path| play_path = Some(path));
                 });
             if let Some(path) = play_path { self.open_file(path); }
+            match panel_action {
+                playlist::PlaylistAction::Add  => { self.show_file_browser = true; }
+                playlist::PlaylistAction::Save => self.save_playlist(),
+                playlist::PlaylistAction::Load => self.load_playlist(),
+                playlist::PlaylistAction::None => {}
+            }
         }
 
         // ── Zone centrale (vidéo) ─────────────────────────────────────────
@@ -814,6 +862,13 @@ impl OmniApp {
                 }
                 if ui.button("✕ Effacer sous-titre").clicked() {
                     self.player.clear_subtitle(); ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("💾 Enregistrer la playlist…").clicked() {
+                    self.save_playlist(); ui.close_menu();
+                }
+                if ui.button("📂 Charger une playlist…").clicked() {
+                    self.load_playlist(); ui.close_menu();
                 }
                 ui.separator();
                 if ui.button("⏻ Quitter  Ctrl+Q").clicked() {

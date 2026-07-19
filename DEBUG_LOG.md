@@ -5,7 +5,11 @@ Format par entrée : `[STATUT] Zone — description`. STATUT ∈ {FIXED, OPEN, T
 
 ---
 
-## Bugs corrigés cette session (v1.4.0 → v1.4.3)
+## Bugs corrigés cette session (v1.4.0 → v1.4.4)
+
+- [FIXED][CRITIQUE] **La barre de progression (seek bar) ne faisait RIEN** — cliquer/glisser dessus redessinait juste le curseur pour la frame courante puis revenait à l'ancienne position la frame suivante ; aucun vrai seek n'était jamais déclenché. Cause : `seek_bar()` (`controls.rs`) construit sa zone interactive via `ui.allocate_exact_size(..., Sense::click_and_drag())` — ce `Response` "brut" ne marque JAMAIS `changed=true` tout seul (contrairement à un `Slider`/`Checkbox` standard qui appelle `mark_changed()` en interne). Le code appelant testait `if seek_bar(...).changed() { *seek_out = Some(pos); }`, qui restait donc perpétuellement faux. **RETRACTATION** : j'avais précédemment marqué "seek bar clic souris" comme TESTED-OK sur la foi d'un test bâclé (vidéo déjà en lecture → l'horodatage progressait naturellement, confondu avec un vrai saut). Signalé par Momo en test réel. Fix : `resp.mark_changed()` ajouté explicitement après mutation de `pos`.
+- [FIXED][HAUTE] **Frame figée après un seek pendant la pause, sur fichier à GOP long/keyframe unique.** Le mécanisme de preview post-seek-en-pause (`demuxer.rs`) décodait jusqu'à trouver la frame cible, mais plafonnait à 400 paquets TOTAUX (vidéo+audio+sous-titres confondus). Sur un fichier avec une seule keyframe pour tout le fichier (repéré sur `test_mkv_long.mkv`, généré par une session précédente), atteindre une cible à 6s depuis l'unique keyframe à t=0 exige de décoder ~180 frames vidéo, largement au-delà du budget dilué par les paquets audio/sous-titres interleaved → recherche abandonnée silencieusement, ancienne image restée affichée indéfiniment (position/barre correctes, mais IMAGE figée). Fix : budget temps réel (800ms) au lieu d'un compte de paquets, insensible au ratio audio/vidéo/sous-titres.
+- [FIXED] **File browser interne rejetait toute extension hors d'une liste blanche codée en dur** — contredit "compatible avec n'importe quel format" : FFmpeg sniffe le contenu réel et se moque de l'extension, mais le bouton "Ouvrir"/double-clic restaient désactivés pour tout fichier dont l'extension n'était pas dans `SUPPORTED_EXTENSIONS` (même très longue, jamais exhaustive : fichier renommé, extension régionale/obscure, absente). Fix : `is_media_file` autorise tout sauf une petite liste noire de types manifestement non-média (exe/dll/txt/zip/pdf/…) ; testé avec un .mp4 renommé en `.xyz123`, ouverture et lecture normales.
 
 - [FIXED] Ctrl+L (ouvrir URL) déclenchait AUSSI le raccourci brut `L` (cycle mode répétition) — `k_l` ne vérifiait pas `!ctrl`. Même défaut sur Ctrl+P (ouvrait le panneau playlist ET appelait `playlist_prev()`). Trouvé par capture d'écran : l'OSD "Répétition : ×1" apparaissait derrière le dialogue URL fraîchement ouvert.
 - [FIXED] Échap ne fermait aucun dialogue modal (URL, file browser, paramètres) — `k_esc` ne gérait que la sortie plein écran. Pire : le dialogue URL force le focus clavier du champ texte à CHAQUE frame (`resp.request_focus()` sans condition), donc `wants_keyboard_input()` reste vrai en continu → même en ajoutant la gestion d'Échap dans `handle_keyboard`, elle n'aurait jamais été atteinte pour ce dialogue précis. Fix : Échap lu directement dans `url_dialog.rs` (en amont du filtre global) ; ajout du cas fermeture file browser/paramètres dans `handle_keyboard`.
@@ -58,16 +62,22 @@ Format par entrée : `[STATUT] Zone — description`. STATUT ∈ {FIXED, OPEN, T
 - [TESTED-OK] Playlist (Ctrl+P) — panneau s'ouvre avec l'entrée courante listée, plus d'effet de bord playlist_prev.
 - [TESTED-OK] Seek bar clic souris (pas seulement clavier) — clic à ~60% de la barre saute correctement à la position correspondante.
 
+## Nouveautés v1.4.4
+
+- **Playlist — enregistrer/charger (M3U8/M3U)** : nouveau module `playlist_io.rs` (`save_m3u`/`load_m3u`), boutons 💾/📂 dans le panneau playlist + menu Fichier. Résout chemins relatifs par rapport au dossier du .m3u, ignore silencieusement les entrées introuvables (playlist déplacée d'une machine à l'autre), supporte les URL réseau telles quelles. 3 tests unitaires (round-trip, entrées manquantes, chemins relatifs) — tous verts.
+- **Bouton "+ Ajouter" du panneau playlist** — ne faisait RIEN (juste un commentaire "s'ouvre via l'app", jamais implémenté). Fix : ouvre maintenant le file browser normalement.
+- **Compatibilité codecs/formats** : validé avec le build FFmpeg complet actuel (527 décodeurs, BtbN full/GPL) au-delà de H.264/AAC déjà testés — **VP9+Opus (WebM)**, **AV1+Vorbis (MKV)**, **FLAC** tous lus sans erreur, badge codec correct affiché. Le décodage ne dépend jamais de l'extension (FFmpeg sniffe le contenu), donc la couverture de codecs est déjà large par construction ; le vrai verrou était le filtre extension du file browser (corrigé ci-dessus).
+
 ## Reste à tester (pas encore couvert)
 
-- [ ] Playlist : ajout multiple (+Ajouter), navigation N/P avec plusieurs éléments, Vider
+- [ ] Playlist : ajout multiple (+Ajouter), navigation N/P avec plusieurs éléments, Vider — bouton +Ajouter maintenant fonctionnel mais pas retesté avec plusieurs fichiers
 - [ ] Drag & drop réel (fichier média + sous-titre) — mécanisme OS, difficile à automatiser ; code lu et cohérent (`handle_drop` dans app.rs), risque faible
-- [ ] Fichiers récents (menu Fichier > Récents)
-- [ ] Redimensionnement fenêtre / changement DPI
-- [ ] Fermeture propre + relecture config au redémarrage (déjà vérifié que volume/vitesse sont sauvegardés en v1.4.0, pas revérifié cette session)
+- [ ] Redimensionnement fenêtre / changement DPI — TESTÉ OK (petite 500×350 et grande 1400×900, rendu correct)
+- [ ] Fermeture propre + relecture config — TESTÉ OK (WM_CLOSE sauvegarde recent_files correctement, revérifié via config.json)
+- [ ] Fichiers récents — TESTÉ OK (menu peuplé, sous-menu affiche les 5 dernières entrées)
 - [ ] Chargement sous-titre manuel (Fichier > Charger sous-titre…)
 - [ ] Effacer sous-titre (Fichier > Effacer sous-titre)
-- [ ] HDR — aucun fichier HDR disponible pour test
+- [ ] HDR — aucun fichier HDR disponible pour test. **Limitation connue identifiée par lecture de code** : le scaler vidéo (`video.rs`) convertit TOUJOURS vers YUV420P 8-bit (`target_fmt` codé en dur), y compris pour une source 10-bit HDR — `PixelFormat::P010Le` existe dans l'enum mais n'est jamais construit (mort). Le contenu HDR est donc décodé et lu, mais tronqué à 8 bits avant rendu : le badge "HDR"/tonemapping s'affichent mais ne reflètent pas un vrai pipeline 10-bit. Non corrigé cette session (aucun fichier pour vérifier un changement sans casser le rendu SDR existant).
 - [ ] Lecture réseau (HTTP/HLS) — non testé
 - [ ] Recherche sous-titres OpenSubtitles / TMDB — nécessite clés API
 - [ ] Sortie audio 5.1/7.1 réelle — aucun device surround disponible ici pour vérifier le fix v1.4.1 sur vrai matériel

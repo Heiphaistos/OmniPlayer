@@ -176,7 +176,18 @@ pub fn run_demuxer(
                 // audio/sous-titres sont ignorés).
                 preview_after_seek = false;
                 if let (Some(vi), Some(dec)) = (v_idx, video_dec.as_mut()) {
-                    'preview: for _ in 0..400 {
+                    // Un GOP long (voire un seul keyframe pour tout le fichier) peut
+                    // exiger de décoder énormément de frames pour rattraper la cible
+                    // depuis la keyframe précédente — pas de limite de PAQUETS totaux
+                    // (audio/sous-titres dilueraient le budget), seulement un plafond
+                    // temps réel généreux pour ne jamais bloquer indéfiniment le
+                    // thread demuxer sur un fichier pathologique/corrompu.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+                    'preview: loop {
+                        if std::time::Instant::now() >= deadline {
+                            log::warn!("preview post-seek: délai dépassé avant d'atteindre la cible");
+                            break;
+                        }
                         let mut pkt = ffmpeg::Packet::empty();
                         if pkt.read(&mut ctx.format_ctx).is_err() { break; }
                         if pkt.stream() == vi {
