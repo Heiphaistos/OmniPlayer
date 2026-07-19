@@ -28,8 +28,9 @@ pub enum PipelineEvent {
     EndOfStream,
     Error(String),
     MetadataReady(Box<crate::probe::MediaInfo>),
-    /// Ligne de sous-titre intégrée (texte, pts_start, pts_end en secondes).
-    SubtitleLine(String, f64, f64),
+    /// Ligne de sous-titre intégrée (ordinal piste, texte, pts_start, pts_end en secondes).
+    /// Toutes les pistes texte sont décodées ; le player filtre par piste active.
+    SubtitleLine(usize, String, f64, f64),
 }
 
 /// Capacité max des queues de frames (frames buffered).
@@ -52,6 +53,7 @@ impl MediaPipeline {
         let (audio_tx, audio_rx)     = bounded::<DecodedAudioFrame>(AUDIO_QUEUE_DEPTH);
 
         let path_clone = path.clone();
+        let event_tx_err = event_tx.clone();
         thread::Builder::new()
             .name("omni-demuxer".into())
             .spawn(move || {
@@ -59,6 +61,8 @@ impl MediaPipeline {
                     &path_clone, cmd_rx, event_tx, video_tx, audio_tx,
                 ) {
                     log::error!("demuxer: {e:#}");
+                    // Remonte l'erreur à l'UI — sinon le player reste bloqué en Playing
+                    let _ = event_tx_err.try_send(PipelineEvent::Error(format!("{e:#}")));
                 }
             })?;
 

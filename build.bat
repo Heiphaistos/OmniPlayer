@@ -105,7 +105,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM Copie les DLLs FFmpeg (nécessaires au runtime)
-if exist "%FFMPEG_DIR%\bin\avcodec-61.dll" (
+if exist "%FFMPEG_DIR%\bin\avcodec-*.dll" (
     copy /Y "%FFMPEG_DIR%\bin\av*.dll"    dist\ >nul
     copy /Y "%FFMPEG_DIR%\bin\sw*.dll"    dist\ >nul
     copy /Y "%FFMPEG_DIR%\bin\postproc*.dll" dist\ >nul 2>nul

@@ -16,7 +16,7 @@ import (
 
 const (
 	baseURL        = "https://api.opensubtitles.com/api/v1"
-	userAgent      = "OmniPlayer v1.2"
+	userAgent      = "OmniPlayer v1.4"
 	maxDownloadSize = 10 * 1024 * 1024 // 10 MB — subtitle files are never larger
 )
 

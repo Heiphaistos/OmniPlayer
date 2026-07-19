@@ -59,8 +59,6 @@ pub fn run_demuxer(
 
     let v_idx = ctx.video_stream_idx;
     let mut a_idx = ctx.audio_stream_idx;
-    // Index du flux subtitle actif (None = sous-titres intégrés désactivés)
-    let mut s_idx: Option<usize> = None;
 
     let v_tb = v_idx.and_then(|i| {
         ctx.format_ctx.stream(i).map(|s| {
@@ -83,11 +81,32 @@ pub fn run_demuxer(
         .transpose()?
         .and_then(|r| r.ok());
 
-    // Décodeur subtitle intégré — construit à la demande lors de SelectSubtitleTrack
-    let mut subtitle_dec: Option<ffmpeg::codec::decoder::Subtitle> = None;
-    let mut s_tb = 0.0f64;
+    // Décodeurs sous-titres : TOUTES les pistes texte dès le départ. Les paquets ne
+    // sont lus qu'une seule fois (en avance sur la lecture) — une activation tardive
+    // de la piste doit retrouver les cues déjà passés. Le player filtre par piste.
+    // (stream_idx, ordinal piste, décodeur, time_base)
+    let mut sub_decs: Vec<(usize, usize, ffmpeg::codec::decoder::Subtitle, f64)> = Vec::new();
+    for (ord, &si) in all_sub_idx.iter().enumerate() {
+        if let Some(st) = ctx.format_ctx.stream(si) {
+            let tb = st.time_base().numerator() as f64
+                / st.time_base().denominator().max(1) as f64;
+            match ffmpeg::codec::context::Context::from_parameters(st.parameters())
+                .ok()
+                .and_then(|cc| cc.decoder().subtitle().ok())
+            {
+                Some(dec) => sub_decs.push((si, ord, dec, tb)),
+                None => log::warn!("piste sous-titre {si}: codec non supporté (bitmap PGS/VOBSUB ?)"),
+            }
+        }
+    }
 
     let mut paused = false;
+    // Après un seek en pause : décoder une frame vidéo pour rafraîchir l'affichage
+    let mut preview_after_seek = false;
+    // Après seek : av_seek_frame se cale sur la keyframe ≤ cible. On décode depuis
+    // la keyframe mais on jette les frames jusqu'au PTS cible (précision à la frame).
+    let mut v_skip_until: Option<f64> = None;
+    let mut a_skip_until: Option<f64> = None;
 
     'main: loop {
         // Traite toutes les commandes en attente
@@ -97,7 +116,12 @@ pub fn run_demuxer(
                 PipelineCommand::Pause  => paused = true,
                 PipelineCommand::Resume => paused = false,
                 PipelineCommand::Seek(pos) => {
-                    ctx.seek(pos)?;
+                    // Un seek raté (flux réseau, format exotique) ne doit pas tuer la
+                    // lecture : on log et on continue à la position courante.
+                    if let Err(e) = ctx.seek(pos) {
+                        log::warn!("seek ignoré: {e:#}");
+                        continue;
+                    }
                     // Vide les buffers internes des décodeurs pour éviter les artefacts post-seek
                     if let Some(dec) = &mut video_dec {
                         let _ = dec.send_eof();
@@ -114,6 +138,9 @@ pub fn run_demuxer(
                     audio_dec = a_idx
                         .and_then(|_| ctx.build_audio_decoder().ok())
                         .and_then(|d| AudioDecoder::new(d, a_tb).ok());
+                    preview_after_seek = paused;
+                    v_skip_until = Some(pos);
+                    a_skip_until = Some(pos);
                 }
                 PipelineCommand::SelectAudioTrack(track) => {
                     if let Some(&new_idx) = all_audio_idx.get(track) {
@@ -134,50 +161,56 @@ pub fn run_demuxer(
                     }
                 }
                 PipelineCommand::SelectSubtitleTrack(track_opt) => {
-                    match track_opt {
-                        None => {
-                            // Désactive les sous-titres intégrés
-                            s_idx = None;
-                            subtitle_dec = None;
-                            log::info!("embedded subtitles disabled");
-                        }
-                        Some(track) => {
-                            if let Some(&new_idx) = all_sub_idx.get(track) {
-                                s_idx = Some(new_idx);
-                                // Construit le décodeur subtitle pour la nouvelle piste
-                                subtitle_dec = None;
-                                if let Some(st) = ctx.format_ctx.stream(new_idx) {
-                                    s_tb = st.time_base().numerator() as f64
-                                        / st.time_base().denominator().max(1) as f64;
-                                    if let Ok(codec_ctx) = ffmpeg::codec::context::Context::from_parameters(
-                                        st.parameters()
-                                    ) {
-                                        subtitle_dec = codec_ctx.decoder().subtitle().ok();
-                                    }
-                                }
-                                if subtitle_dec.is_some() {
-                                    log::info!("subtitle track switched → stream {new_idx}");
-                                } else {
-                                    log::warn!("subtitle track {new_idx}: codec init failed (bitmap/PGS not supported)");
-                                }
-                            } else {
-                                log::warn!("subtitle track {track} out of range (max {})", all_sub_idx.len());
-                            }
-                        }
-                    }
+                    // Toutes les pistes texte sont décodées en continu — la sélection
+                    // est purement un filtre côté player. Log informatif seulement.
+                    log::info!("subtitle track selection: {track_opt:?}");
                 }
                 _ => {}
             }
         }
 
         if paused {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            if preview_after_seek {
+                // Seek pendant la pause : décode UNE frame vidéo à la nouvelle
+                // position pour que l'affichage se rafraîchisse (les paquets
+                // audio/sous-titres sont ignorés).
+                preview_after_seek = false;
+                if let (Some(vi), Some(dec)) = (v_idx, video_dec.as_mut()) {
+                    'preview: for _ in 0..400 {
+                        let mut pkt = ffmpeg::Packet::empty();
+                        if pkt.read(&mut ctx.format_ctx).is_err() { break; }
+                        if pkt.stream() == vi {
+                            let _ = dec.send_packet(&pkt);
+                            let mut sent = false;
+                            while let Ok(Some(frame)) = dec.receive_frame() {
+                                // Même logique post-seek : atteindre le PTS cible
+                                if let Some(su) = v_skip_until {
+                                    if frame.pts_secs < su - 0.05 { continue; }
+                                    v_skip_until = None;
+                                }
+                                let _ = event_tx.try_send(
+                                    PipelineEvent::PositionChanged(frame.pts_secs));
+                                let _ = video_tx.try_send(frame);
+                                sent = true;
+                            }
+                            if sent { break 'preview; }
+                        }
+                    }
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             continue;
         }
 
-        // NOTE : pas de check video_tx.is_full() ici — le faire bloquerait l'audio et
-        // empêcherait le premier PositionChanged d'arriver, laissant le player en Loading
-        // indéfiniment (deadlock). Le try_send ci-dessous gère l'overflow silencieusement.
+        // Régulation du débit : queues aval pleines = on attend au lieu de décoder tout
+        // le fichier en avance (sinon drops massifs de frames vidéo et overflow du ring
+        // audio). Pas de deadlock : pump_audio draine toujours, pump_video draine aussi
+        // en Loading, et PositionChanged est émis dès qu'une frame passe.
+        if video_tx.is_full() || audio_tx.is_full() {
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            continue;
+        }
 
         let mut packet = ffmpeg::Packet::empty();
         match packet.read(&mut ctx.format_ctx) {
@@ -199,6 +232,11 @@ pub fn run_demuxer(
             if let Some(dec) = &mut video_dec {
                 let _ = dec.send_packet(&packet);
                 while let Ok(Some(frame)) = dec.receive_frame() {
+                    // Post-seek : jeter les frames entre la keyframe et la cible
+                    if let Some(su) = v_skip_until {
+                        if frame.pts_secs < su - 0.05 { continue; }
+                        v_skip_until = None;
+                    }
                     // PositionChanged depuis la vidéo aussi : garantit Loading→Playing
                     // même si l'audio n'a pas encore produit de frame (ex: début I-frame lourd)
                     let _ = event_tx.try_send(PipelineEvent::PositionChanged(frame.pts_secs));
@@ -209,6 +247,11 @@ pub fn run_demuxer(
             if let Some(dec) = &mut audio_dec {
                 let _ = dec.send_packet(&packet);
                 while let Ok(Some(frame)) = dec.receive_frame() {
+                    // Post-seek : jeter l'audio entre la keyframe et la cible
+                    if let Some(su) = a_skip_until {
+                        if frame.pts_secs < su - 0.05 { continue; }
+                        a_skip_until = None;
+                    }
                     let pos = frame.pts_secs;
                     let _ = event_tx.try_send(PipelineEvent::PositionChanged(pos));
                     // Audio : on attend si nécessaire — ne jamais dropper de frame audio
@@ -218,21 +261,21 @@ pub fn run_demuxer(
                     );
                 }
             }
-        } else if s_idx.is_some() && Some(stream_idx) == s_idx {
-            // Décode les paquets de sous-titres intégrés via le décodeur initialisé
-            if let Some(dec) = &mut subtitle_dec {
-                let pts_start = packet.pts().unwrap_or(0).max(0) as f64 * s_tb;
-                let duration_secs = packet.duration() as f64 * s_tb;
-                let pts_end = pts_start + duration_secs.max(1.0);
+        } else if let Some((_, ord, dec, tb)) = sub_decs.iter_mut()
+            .find(|(si, _, _, _)| *si == stream_idx)
+        {
+            // Décode les paquets sous-titres de toutes les pistes texte
+            let pts_start = packet.pts().unwrap_or(0).max(0) as f64 * *tb;
+            let duration_secs = packet.duration() as f64 * *tb;
+            let pts_end = pts_start + duration_secs.max(1.0);
 
-                let mut subtitle = ffmpeg::Subtitle::new();
-                if dec.decode(&packet, &mut subtitle) == Ok(true) {
-                    let text = collect_subtitle_text(&subtitle);
-                    if !text.is_empty() {
-                        let _ = event_tx.try_send(
-                            PipelineEvent::SubtitleLine(text, pts_start, pts_end)
-                        );
-                    }
+            let mut subtitle = ffmpeg::Subtitle::new();
+            if dec.decode(&packet, &mut subtitle) == Ok(true) {
+                let text = collect_subtitle_text(&subtitle);
+                if !text.is_empty() {
+                    let _ = event_tx.try_send(
+                        PipelineEvent::SubtitleLine(*ord, text, pts_start, pts_end)
+                    );
                 }
             }
         }
@@ -256,11 +299,24 @@ fn collect_subtitle_text(subtitle: &ffmpeg::Subtitle) -> String {
                 }
             }
             Rect::Ass(a) => {
-                // Ligne ASS : format "Layer,Start,End,Style,Name,MLeft,MRight,MVert,Effect,Text"
+                // Le decoder subrip/ass de FFmpeg produit soit une ligne complète
+                // "Dialogue: Layer,Start,End,Style,Name,..,Text", soit directement les
+                // champs après le timing selon le codec. On extrait le texte après le
+                // 8e champ « Effect » quand le préfixe Dialogue est présent, sinon on
+                // prend tout. Robuste aux deux formes.
                 let line = a.get();
-                let text = line.splitn(10, ',').nth(9).unwrap_or("").trim().to_string();
-                // Supprime les overrides ASS {…}
-                let clean = strip_ass_overrides(&text);
+                let body = line.strip_prefix("Dialogue:").unwrap_or(line);
+                // Une ligne Dialogue a 9 champs avant le texte ; les événements bruts
+                // du décodeur subrip n'ont que Layer + texte. On compte les virgules.
+                let comma_count = body.matches(',').count();
+                let text = if comma_count >= 9 {
+                    body.splitn(10, ',').nth(9).unwrap_or("")
+                } else {
+                    // Format "ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
+                    // (subrip → ass : 8 champs avant le texte)
+                    body.splitn(9, ',').last().unwrap_or(body)
+                };
+                let clean = strip_ass_overrides(text.trim());
                 if !clean.trim().is_empty() {
                     parts.push(clean.trim().to_string());
                 }

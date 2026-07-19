@@ -39,6 +39,15 @@ pub struct Player {
     pub sub_track_idx:    Option<usize>,
     pub clock:            MasterClock,
     pub image_frame:      Option<ImageFrame>,
+    /// Sous-titres intégrés décodés en avance : (piste, texte, pts_start, pts_end).
+    /// Toutes les pistes sont conservées — le filtrage se fait à l'affichage.
+    embedded_events:      Vec<(usize, String, f64, f64)>,
+    /// Signale à l'app que le moteur audio doit être purgé (seek / nouveau fichier).
+    pub audio_flush_needed: bool,
+    /// true = l'horloge est pilotée par la position audio réellement jouée
+    /// (app::sync_clock_to_audio). Les PositionChanged du pipeline (position de
+    /// DÉCODAGE, en avance de tout le buffer) ne pilotent alors plus l'horloge.
+    pub clock_audio_master: bool,
     pipeline:             Option<MediaPipeline>,
 }
 
@@ -58,6 +67,9 @@ impl Player {
             sub_track_idx:    None,
             clock:            MasterClock::new(),
             image_frame:      None,
+            embedded_events:  Vec::new(),
+            audio_flush_needed: false,
+            clock_audio_master: false,
             pipeline:         None,
         }
     }
@@ -75,6 +87,8 @@ impl Player {
         self.audio_track_idx  = 0;
         self.sub_track_idx    = None;
         self.image_frame      = None;
+        self.embedded_events.clear();
+        self.audio_flush_needed = true;
         self.clock            = MasterClock::new();
 
         if omni_core::is_image_path(path) {
@@ -138,16 +152,41 @@ impl Player {
                 self.clock.resume();
                 self.state = PlayerState::Playing;
             }
+            // Fin de fichier : le pipeline est terminé — on relance depuis le début
+            PlayerState::EndOfFile => { self.replay(); }
             _ => {}
         }
+    }
+
+    /// Relance le média courant depuis le début (pipeline terminé après EOF).
+    /// Préserve le sous-titre externe chargé. Retourne false si aucun média.
+    pub fn replay(&mut self) -> bool {
+        let Some(path) = self.media_info.as_ref().map(|i| i.path.clone()) else { return false };
+        let subs = self.subtitle_track.take();
+        let ok = self.open(&path).is_ok();
+        if ok { self.subtitle_track = subs; }
+        ok
     }
 
     pub fn seek(&mut self, pos: f64) {
         if self.is_image_mode() { return; }
         let pos = pos.clamp(0.0, self.duration.max(0.0));
-        if let Some(p) = &self.pipeline { p.send_command(PipelineCommand::Seek(pos)); }
+        // Pipeline terminé (EOF) : relancer puis positionner
+        if self.state == PlayerState::EndOfFile {
+            if !self.replay() { return; }
+        }
+        if let Some(p) = &self.pipeline {
+            p.send_command(PipelineCommand::Seek(pos));
+            // Purge les frames pré-seek déjà décodées en file (jusqu'à ~10 s d'audio
+            // et 16 frames vidéo) — sinon elles seraient rejouées après le seek
+            while p.try_recv_audio_frame().is_some() {}
+            while p.try_recv_video_frame().is_some() {}
+        }
         self.position = pos;
         self.clock.seek(pos);
+        self.embedded_events.clear();
+        self.current_subtitle = None;
+        self.audio_flush_needed = true;
     }
 
     pub fn seek_relative(&mut self, delta: f64) {
@@ -211,6 +250,7 @@ impl Player {
                     _                 => None,
                 };
                 self.sub_track_idx = next;
+                if next.is_none() { self.current_subtitle = None; }
                 if let Some(p) = &self.pipeline {
                     p.send_command(PipelineCommand::SelectSubtitleTrack(self.sub_track_idx));
                 }
@@ -261,8 +301,12 @@ impl Player {
             match event {
                 PipelineEvent::DurationKnown(d) => { self.duration = d; }
                 PipelineEvent::PositionChanged(p) => {
-                    self.position = p;
-                    self.clock.update(p);
+                    // p = position de décodage, en avance de tout le buffer sur la
+                    // lecture. Ne pilote l'horloge que si l'audio ne le fait pas.
+                    if !self.clock_audio_master {
+                        self.position = p;
+                        self.clock.update(p);
+                    }
                     if self.state == PlayerState::Loading {
                         self.state = PlayerState::Playing;
                         self.clock.resume();
@@ -275,10 +319,16 @@ impl Player {
                     self.chapters   = info.chapters.clone();
                     self.media_info = Some(*info);
                 }
-                PipelineEvent::SubtitleLine(text, _start, _end) => {
-                    // Sous-titre décodé depuis le conteneur — affichage immédiat
-                    // (le timing est géré côté demuxer via la position du paquet)
-                    self.current_subtitle = if text.is_empty() { None } else { Some(text) };
+                PipelineEvent::SubtitleLine(track, text, start, end) => {
+                    // Les paquets sont décodés en avance sur la lecture : on met en file
+                    // et update_subtitle() affiche au bon PTS (filtré par piste active).
+                    if !text.is_empty() {
+                        self.embedded_events.push((track, text, start, end));
+                        // Garde-fou mémoire : ne conserve que les 512 derniers événements
+                        if self.embedded_events.len() > 512 {
+                            self.embedded_events.remove(0);
+                        }
+                    }
                 }
             }
         }
@@ -287,10 +337,20 @@ impl Player {
     }
 
     fn update_subtitle(&mut self) {
-        self.current_subtitle = self.subtitle_track.as_ref().and_then(|t| {
+        // Sous-titre externe (fichier .srt/.ass chargé) : prioritaire
+        if let Some(t) = &self.subtitle_track {
             let pos = Duration::from_secs_f64(self.position.max(0.0));
-            t.events_at(pos).next().map(|e| e.text.clone())
-        });
+            self.current_subtitle = t.events_at(pos).next().map(|e| e.text.clone());
+            return;
+        }
+        // Sous-titres intégrés : affiche l'événement de la piste active couvrant
+        // la position courante
+        if let Some(track) = self.sub_track_idx {
+            let pos = self.position;
+            self.current_subtitle = self.embedded_events.iter()
+                .find(|(tr, _, s, e)| *tr == track && *s <= pos && pos <= *e)
+                .map(|(_, t, _, _)| t.clone());
+        }
     }
 
     pub fn is_active(&self) -> bool {

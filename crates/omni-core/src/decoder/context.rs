@@ -100,10 +100,29 @@ impl DecodeContext {
     }
 
     /// Seek vers une position en secondes.
+    /// av_seek_frame + BACKWARD : se cale sur la keyframe ≤ cible (standard lecteurs).
+    /// L'ancien `format_ctx.seek(ts, ts..)` (min_ts = cible) échouait en EPERM sur MP4.
     pub fn seek(&mut self, position_secs: f64) -> Result<()> {
         let ts = (position_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
-        self.format_ctx
-            .seek(ts, ts..)
-            .context("seek échoué")
+        unsafe {
+            let ret = ffmpeg::ffi::av_seek_frame(
+                self.format_ctx.as_mut_ptr(),
+                -1,
+                ts,
+                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+            );
+            if ret >= 0 { return Ok(()); }
+            // Fallback pour les formats sans av_seek_frame fonctionnel
+            let ret2 = ffmpeg::ffi::avformat_seek_file(
+                self.format_ctx.as_mut_ptr(),
+                -1,
+                i64::MIN,
+                ts,
+                i64::MAX,
+                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+            );
+            if ret2 >= 0 { return Ok(()); }
+            anyhow::bail!("seek échoué (av_seek_frame={ret}, avformat_seek_file={ret2})");
+        }
     }
 }

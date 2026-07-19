@@ -64,7 +64,8 @@ impl MasterClock {
         let pos = {
             let base_us = self.inner.pos_us.load(Ordering::Relaxed) as f64;
             let elapsed = self.inner.updated.lock().elapsed().as_micros() as f64;
-            (base_us + elapsed) / 1_000_000.0
+            let speed   = f32::from_bits(self.inner.speed.load(Ordering::Relaxed)) as f64;
+            (base_us + elapsed * speed) / 1_000_000.0
         };
         self.inner.paused.store(1, Ordering::Relaxed);
         self.update(pos);

@@ -2,6 +2,27 @@
 
 ---
 
+## v1.4.0 (2026-07-19) — Lecture fiable de bout en bout
+
+### Corrections
+
+- **[CRITIQUE] Sous-titres intégrés réellement affichés** — `poll_events` recevait `SubtitleLine` puis `update_subtitle()` écrasait aussitôt `current_subtitle` avec `None` dès qu'aucun sous-titre externe n'était chargé. Les événements intégrés sont maintenant mis en file `(texte, pts_start, pts_end)` et affichés à leur PTS exact (les paquets sont décodés en avance sur la lecture).
+- **[CRITIQUE] Purge audio au seek et au changement de fichier** — le ring buffer (8 s) continuait de jouer l'ancien flux après un seek ou une ouverture, causant une désynchronisation A/V de plusieurs secondes. Nouveau `AudioEngine::flush()` (générations de frames + vidage du ring) déclenché via `Player::audio_flush_needed`.
+- **[CRITIQUE] Régulation du débit de décodage** — le demuxer décodait tout le fichier à vitesse maximale : frames vidéo droppées (`try_send` sur queue pleine) et overflow du ring audio. Le demuxer attend désormais quand les queues aval sont pleines ; `pump_audio` vise ~4 s de ring ; `pump_video` draine aussi en `Loading` (pas de deadlock).
+- **[HAUTE] Répétition ×1 réparée** — après fin de fichier, le thread demuxer est terminé : `seek(0)` partait dans le vide. `Player::replay()` relance un pipeline complet en préservant le sous-titre externe.
+- **[HAUTE] Fin de fichier ne gèle plus le lecteur** — l'état reste `EndOfFile` ; Espace ou un seek relancent la lecture (`replay`), au lieu d'envoyer des commandes à un pipeline mort.
+- **[MOYENNE] Erreurs demuxer remontées à l'UI** — une erreur en cours de lecture (seek impossible, flux corrompu) émettait seulement un log ; l'UI restait en `Playing` figé. L'événement `Error` est maintenant envoyé.
+- Volume et vitesse de lecture restaurés au démarrage (ils étaient sauvegardés mais jamais relus).
+- Drop de sous-titres insensible à la casse (`.SRT` accepté).
+- `MasterClock::pause()` tient compte de la vitesse de lecture dans le snapshot de position.
+- `build.bat` : détection des DLLs FFmpeg par joker (`avcodec-*.dll`) au lieu de la version 61 codée en dur.
+
+### Nouveautés
+
+- **Ouverture par ligne de commande** — `OmniPlayer.exe <fichier|URL>` : association de fichiers Windows et « Ouvrir avec » fonctionnels.
+
+---
+
 ## v1.3.1 (2026-05-24) — Correctifs
 
 ### Corrections

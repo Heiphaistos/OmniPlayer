@@ -40,10 +40,11 @@ pub struct OmniApp {
     pending_video_frame: Option<omni_core::decoder::DecodedVideoFrame>,
     video_color_space: u32,   // 0=BT601, 1=BT709, 2=BT2020
     last_title:        String, // pour détecter les changements de fichier
+    paused_preview:    bool,   // seek en pause : afficher la frame preview à venir
 }
 
 impl OmniApp {
-    pub fn new(cc: &CreationContext, config: AppConfig) -> Self {
+    pub fn new(cc: &CreationContext, config: AppConfig, initial_file: Option<String>) -> Self {
         Self::apply_theme(&cc.egui_ctx);
 
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
@@ -70,7 +71,7 @@ impl OmniApp {
             (None, Some(Osd { text: msg.to_string(), expires_at: 0.0 }))
         };
 
-        Self {
+        let mut app = Self {
             player: Player::new(), audio, config,
             show_settings: false, show_playlist: false,
             show_file_browser: false, show_url_dialog: false,
@@ -86,7 +87,21 @@ impl OmniApp {
             pending_video_frame: None,
             video_color_space: 1,
             last_title: String::new(),
+            paused_preview: false,
+        };
+
+        // Restaure volume et vitesse de la session précédente
+        app.player.volume = app.config.volume.clamp(0.0, 2.0);
+        app.player.set_speed(app.config.playback_speed.clamp(0.25, 4.0));
+
+        // Fichier passé en ligne de commande (« Ouvrir avec » Windows)
+        if let Some(path) = initial_file {
+            app.playlist_items.push(path.clone());
+            app.playlist_idx = Some(0);
+            app.open_file(path);
         }
+
+        app
     }
 
     fn apply_theme(ctx: &Context) {
@@ -119,7 +134,8 @@ impl OmniApp {
 
     fn open_file(&mut self, path: String) {
         log::info!("ouverture: {path}");
-        self.try_load_adjacent_subtitle(&path);
+        *self.video_frame.lock() = None;
+        self.pending_video_frame = None;
         self.config.add_recent(&path);
         // Reset image viewer pour nouvelle image
         self.image_viewer.reset();
@@ -129,6 +145,8 @@ impl OmniApp {
             log::error!("player.open: {e}");
             self.player.state = PlayerState::Error(e.to_string());
         }
+        // APRÈS open() — open() réinitialise subtitle_track, l'inverse le perdait
+        self.try_load_adjacent_subtitle(&path);
     }
 
     fn try_load_adjacent_subtitle(&mut self, media_path: &str) {
@@ -139,6 +157,7 @@ impl OmniApp {
             if sub.exists() {
                 if self.player.load_subtitle(&sub.to_string_lossy()).is_ok() {
                     let name = sub.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    log::info!("sous-titre adjacent chargé: {name}");
                     self.set_osd(format!("Sous-titre : {name}"));
                 }
                 break;
@@ -163,23 +182,80 @@ impl OmniApp {
         }
     }
 
+    /// Horloge maître = audio réellement joué. Sans ça, l'horloge suit la position
+    /// de DÉCODAGE (en avance de ~14 s de buffers) et la vidéo court devant l'audio.
+    fn sync_clock_to_audio(&mut self) {
+        self.player.clock_audio_master = false;
+        if self.player.is_image_mode() { return; }
+        let has_audio = self.player.media_info.as_ref()
+            .map(|i| !i.audio.is_empty()).unwrap_or(false);
+        if !has_audio { return; }
+        // Vitesse ≠ 1 : l'audio joue toujours à 1× (pas de time-stretch) — on
+        // laisse l'horloge murale piloter, l'audio sera désynchronisé (limitation).
+        if (self.player.speed() - 1.0).abs() > 0.01 { return; }
+        let Some(audio) = &self.audio else { return };
+        let Some(pos) = audio.playback_position() else {
+            // Pas encore de données post-flush : on fige l'horloge sur la position
+            // connue plutôt que de laisser les événements de décodage la pousser.
+            self.player.clock_audio_master = true;
+            return;
+        };
+        self.player.clock_audio_master = true;
+        if matches!(self.player.state, PlayerState::Playing | PlayerState::Buffering(_)) {
+            self.player.position = pos;
+            self.player.clock.update(pos);
+        }
+    }
+
+    /// Purge demandée par le player (seek / nouveau fichier) : audio buffurisé
+    /// (jusqu'à 8 s de ring) + frame vidéo en attente.
+    fn process_flush(&mut self) {
+        if !self.player.audio_flush_needed { return; }
+        self.player.audio_flush_needed = false;
+        if let Some(a) = &self.audio { a.flush(); }
+        self.pending_video_frame = None;
+        // Seek pendant la pause : le demuxer va envoyer une frame de preview
+        if self.player.state == PlayerState::Paused {
+            self.paused_preview = true;
+        }
+    }
+
     fn pump_audio(&mut self) {
         let Some(audio) = &self.audio else { return };
         audio.set_paused(self.player.state == PlayerState::Paused);
         audio.set_volume(self.player.effective_volume());
 
-        // Drainer toutes les frames disponibles — push_frame est non-bloquant (try_send).
-        // Le canal interne (512) + la backpressure de fill_ring (3 s) régulent le débit.
-        // Ne PAS limiter ici pour éviter d'engorger audio_rx (ce qui bloque le demuxer vidéo).
-        while let Some(frame) = self.player.try_recv_audio_frame() {
+        // Régulation : vise ~4 s de ring (capacité 8 s), max 32 frames par repaint.
+        // Le demuxer se met en attente quand audio_rx (512) est plein — chaîne de
+        // backpressure complète, plus aucun drop en régime établi.
+        let mut pushed = 0;
+        while audio.buffered_secs() < 4.0 && pushed < 32 {
+            let Some(frame) = self.player.try_recv_audio_frame() else { break };
             audio.push_frame(frame);
+            pushed += 1;
         }
     }
 
     fn pump_video(&mut self) {
         if self.player.is_image_mode() { return; }
+
+        // Seek effectué en pause : affiche la frame de preview dès son arrivée
+        // (la queue a été purgée au seek — la seule frame qui arrive est la preview)
+        if self.player.state == PlayerState::Paused {
+            if self.paused_preview {
+                if let Some(frame) = self.player.try_recv_video_frame() {
+                    *self.video_frame.lock() = Some(frame);
+                    self.paused_preview = false;
+                }
+            }
+            return;
+        }
+        self.paused_preview = false;
+
+        // Loading inclus : draine la queue vidéo dès le départ pour ne pas bloquer
+        // le demuxer (régulation par queues pleines) avant le passage en Playing
         if !matches!(self.player.state,
-            PlayerState::Playing | PlayerState::Buffering(_)) { return; }
+            PlayerState::Playing | PlayerState::Buffering(_) | PlayerState::Loading) { return; }
 
         let clock = self.player.clock.position_secs();
 
@@ -362,8 +438,9 @@ impl OmniApp {
                 .collect()
         );
         for path in dropped {
-            let is_sub = path.ends_with(".srt") || path.ends_with(".ass")
-                      || path.ends_with(".ssa") || path.ends_with(".vtt");
+            let lower = path.to_lowercase();
+            let is_sub = lower.ends_with(".srt") || lower.ends_with(".ass")
+                      || lower.ends_with(".ssa") || lower.ends_with(".vtt");
             if is_sub {
                 if self.player.load_subtitle(&path).is_ok() { self.set_osd("Sous-titre chargé"); }
             } else {
@@ -445,8 +522,10 @@ impl eframe::App for OmniApp {
         }
 
         // Pipeline
+        self.sync_clock_to_audio();
         self.player.poll_events();
         self.process_seek();
+        self.process_flush();
         self.pump_audio();
         self.pump_video();
         self.ensure_image_texture(ctx);
@@ -464,8 +543,9 @@ impl eframe::App for OmniApp {
             self.pending_video_frame = None;
             match &self.config.loop_mode.clone() {
                 crate::config::LoopMode::One => {
-                    self.player.seek(0.0);
-                    self.player.state = PlayerState::Playing;
+                    // Le pipeline est terminé après EOF : replay relance un pipeline
+                    // complet (seek seul serait envoyé à un thread mort)
+                    self.player.replay();
                 }
                 crate::config::LoopMode::All => {
                     let next = self.playlist_idx.map(|i| i + 1).unwrap_or(0);
@@ -492,8 +572,8 @@ impl eframe::App for OmniApp {
                     } else { false };
 
                     if !had_next {
-                        // Fin de playlist : rester sur la dernière frame, état Paused
-                        self.player.state = PlayerState::Paused;
+                        // Fin de playlist : rester sur la dernière frame en EndOfFile.
+                        // Espace ou seek relancent le média (Player::replay).
                         self.player.clock.pause();
                     }
                 }
@@ -636,6 +716,9 @@ impl eframe::App for OmniApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.player.stop();
+        // Persiste volume et vitesse de lecture pour la prochaine session
+        self.config.volume = self.player.volume;
+        self.config.playback_speed = self.player.speed();
         self.config.save();
     }
 }

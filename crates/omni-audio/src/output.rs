@@ -14,13 +14,20 @@ const RING_SECS: usize = 8;  // 8 s de buffer pour absorber les rafales
 
 pub struct AudioEngine {
     _stream:     cpal::Stream,
-    sender:      Sender<DecodedAudioFrame>,
+    sender:      Sender<(u64, DecodedAudioFrame)>,
     volume:      Arc<AtomicU32>,
     paused:      Arc<AtomicBool>,
     device_rate: u32,
     channels:    usize,
     ring_level:  Arc<AtomicU64>,
+    generation:  Arc<AtomicU64>,
+    consumer:    Arc<parking_lot::Mutex<HeapConsumer<f32>>>,
+    /// PTS (secondes, f64 bits) de la fin du dernier frame poussé dans le ring.
+    /// u64::MAX = sentinelle « pas encore de donnée » (après flush/démarrage).
+    last_pts:    Arc<AtomicU64>,
 }
+
+const PTS_NONE: u64 = u64::MAX;
 
 impl AudioEngine {
     pub fn new() -> Result<Self> {
@@ -44,15 +51,24 @@ impl AudioEngine {
         let volume     = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let paused     = Arc::new(AtomicBool::new(false));
         let ring_level = Arc::new(AtomicU64::new(0));
+        let generation = Arc::new(AtomicU64::new(0));
+        let last_pts   = Arc::new(AtomicU64::new(PTS_NONE));
 
-        // Canal non-borné : push_frame ne bloque ni ne droppe jamais de frame
-        let (tx, rx) = unbounded::<DecodedAudioFrame>();
+        // Canal non-borné : push_frame ne bloque ni ne droppe jamais de frame.
+        // Chaque frame est taguée avec la génération courante — flush() incrémente
+        // la génération, les frames périmées sont jetées par fill_ring.
+        let (tx, rx) = unbounded::<(u64, DecodedAudioFrame)>();
+
+        // Consumer partagé entre le callback CPAL et flush() (vidage du ring au seek)
+        let consumer = Arc::new(parking_lot::Mutex::new(consumer));
 
         {
             let ring_level2 = ring_level.clone();
+            let gen2        = generation.clone();
+            let last_pts2   = last_pts.clone();
             std::thread::Builder::new()
                 .name("audio-fill".into())
-                .spawn(move || fill_ring(rx, producer, device_rate, channels, ring_level2))?;
+                .spawn(move || fill_ring(rx, producer, device_rate, channels, ring_level2, gen2, last_pts2))?;
         }
 
         let vol_w      = volume.clone();
@@ -61,7 +77,7 @@ impl AudioEngine {
         let fmt        = config.sample_format();
         let cfg: cpal::StreamConfig = config.into();
 
-        let stream = build_stream(&device, &cfg, fmt, consumer, vol_w, paused_w, rl_w)?;
+        let stream = build_stream(&device, &cfg, fmt, consumer.clone(), vol_w, paused_w, rl_w)?;
         stream.play().context("play stream audio")?;
 
         Ok(Self {
@@ -72,6 +88,9 @@ impl AudioEngine {
             device_rate,
             channels,
             ring_level,
+            generation,
+            consumer,
+            last_pts,
         })
     }
 
@@ -85,7 +104,29 @@ impl AudioEngine {
 
     /// Pousse un frame décodé — canal non-borné, jamais de drop.
     pub fn push_frame(&self, frame: DecodedAudioFrame) {
-        let _ = self.sender.send(frame);
+        let _ = self.sender.send((self.generation.load(Ordering::Relaxed), frame));
+    }
+
+    /// Vide tout l'audio en attente (ring + canal) — à appeler au seek et au
+    /// changement de fichier pour éviter de jouer l'ancien flux (désync A/V).
+    pub fn flush(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.last_pts.store(PTS_NONE, Ordering::Relaxed);
+        let mut c = self.consumer.lock();
+        let n = c.len();
+        c.skip(n);
+        drop(c);
+        self.ring_level.store(0, Ordering::Release);
+    }
+
+    /// Position de lecture réelle estimée (secondes de média) : PTS de fin du
+    /// dernier frame entré dans le ring, moins ce qui reste à jouer dans le ring.
+    /// None tant qu'aucune donnée n'est arrivée (démarrage, juste après flush).
+    pub fn playback_position(&self) -> Option<f64> {
+        let bits = self.last_pts.load(Ordering::Relaxed);
+        if bits == PTS_NONE { return None; }
+        let last = f64::from_bits(bits);
+        Some((last - self.buffered_secs()).max(0.0))
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -103,15 +144,12 @@ fn build_stream(
     device:     &cpal::Device,
     cfg:        &cpal::StreamConfig,
     fmt:        cpal::SampleFormat,
-    consumer:   HeapConsumer<f32>,
+    cons:       Arc<parking_lot::Mutex<HeapConsumer<f32>>>,
     volume:     Arc<AtomicU32>,
     paused:     Arc<AtomicBool>,
     ring_level: Arc<AtomicU64>,
 ) -> Result<cpal::Stream> {
     let err_fn = |e: cpal::StreamError| log::error!("cpal error: {e}");
-
-    // Consumer protégé par Mutex léger — seul CPAL y accède, jamais contention
-    let cons = Arc::new(parking_lot::Mutex::new(consumer));
 
     let stream = match fmt {
         cpal::SampleFormat::F32 => {
@@ -291,15 +329,26 @@ fn build_stream(
 // ─── Thread fill_ring ────────────────────────────────────────────────────────
 
 fn fill_ring(
-    rx:           Receiver<DecodedAudioFrame>,
+    rx:           Receiver<(u64, DecodedAudioFrame)>,
     mut producer: HeapProducer<f32>,
     device_rate:  u32,
     dev_ch:       usize,
     ring_level:   Arc<AtomicU64>,
+    generation:   Arc<AtomicU64>,
+    last_pts:     Arc<AtomicU64>,
 ) {
     let mut resampler: Option<AudioResampler> = None;
 
-    for frame in rx {
+    for (gen, frame) in rx {
+        // Frame d'une génération périmée (flush depuis) → jeter
+        if gen != generation.load(Ordering::Relaxed) { continue; }
+
+        // PTS de fin du frame — sert d'horloge de lecture (playback_position)
+        let frame_dur = if frame.sample_rate > 0 && frame.channels > 0 {
+            frame.samples.len() as f64
+                / (frame.sample_rate as f64 * frame.channels as f64)
+        } else { 0.0 };
+        last_pts.store((frame.pts_secs + frame_dur).to_bits(), Ordering::Relaxed);
         let in_ch   = frame.channels as usize;
         let in_rate = frame.sample_rate;
 

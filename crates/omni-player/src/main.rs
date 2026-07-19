@@ -19,6 +19,10 @@ fn main() -> Result<()> {
     // Charge la config utilisateur
     let cfg = config::AppConfig::load();
 
+    // Fichier passé en argument (association de fichiers / « Ouvrir avec » / CLI)
+    let initial_file = std::env::args().nth(1)
+        .filter(|p| p.starts_with("http") || std::path::Path::new(p).exists());
+
     let options = NativeOptions {
         viewport: ViewportBuilder::default()
             .with_title("OmniPlayer")
@@ -32,7 +36,7 @@ fn main() -> Result<()> {
     eframe::run_native(
         "OmniPlayer",
         options,
-        Box::new(|cc| Ok(Box::new(app::OmniApp::new(cc, cfg)))),
+        Box::new(|cc| Ok(Box::new(app::OmniApp::new(cc, cfg, initial_file)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }
