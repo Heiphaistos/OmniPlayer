@@ -355,14 +355,14 @@ impl OmniApp {
                 i.key_pressed(Key::A),
                 i.key_pressed(Key::M),
                 i.key_pressed(Key::N),
-                i.key_pressed(Key::P),
+                !ctrl && i.key_pressed(Key::P),
                 i.key_pressed(Key::I),
                 ctrl && i.key_pressed(Key::O),
                 ctrl && i.key_pressed(Key::L),
                 ctrl && i.key_pressed(Key::P),
                 ctrl && i.key_pressed(Key::Q),
                 i.key_pressed(Key::W),
-                i.key_pressed(Key::L),
+                !ctrl && i.key_pressed(Key::L),
                 i.key_pressed(Key::OpenBracket),
                 i.key_pressed(Key::CloseBracket),
                 shift,
@@ -444,9 +444,15 @@ impl OmniApp {
             self.is_fullscreen = !self.is_fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
         }
-        if k_esc && self.is_fullscreen {
-            self.is_fullscreen = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        if k_esc {
+            if self.is_fullscreen {
+                self.is_fullscreen = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            } else if self.show_file_browser {
+                self.show_file_browser = false;
+            } else if self.show_settings {
+                self.show_settings = false;
+            }
         }
     }
 

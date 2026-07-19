@@ -5,7 +5,11 @@ const VALID_SCHEMES: &[&str] = &["http://", "https://", "rtsp://", "rtmp://", "u
 /// Retourne `Some(url)` quand l'utilisateur valide, `None` si en attente.
 pub fn show(ctx: &Context, open: &mut bool, input: &mut String) -> Option<String> {
     let mut result: Option<String> = None;
-    let mut should_close = false;
+    // Le champ texte garde le focus clavier en continu (request_focus() ci-dessous,
+    // chaque frame) : wants_keyboard_input() reste vrai tant que la fenêtre est
+    // ouverte, ce qui bloque Échap au niveau global (handle_keyboard dans app.rs).
+    // On lit donc Échap directement ici, en amont de ce filtrage.
+    let mut should_close = ctx.input(|i| i.key_pressed(Key::Escape));
 
     Window::new("🔗  Ouvrir une URL")
         .open(open)
