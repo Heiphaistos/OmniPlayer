@@ -2,6 +2,18 @@
 
 ---
 
+## v1.4.2 (2026-07-19) — Fix blocage + dérive sans périphérique audio
+
+### Corrections
+
+- **[CRITIQUE] Lecteur figé après ~30 s, seek qui ne répond plus.** Quand le périphérique audio ne peut pas s'ouvrir (device désactivé/absent, driver en échec — reproduit en VM Hyper-V sans carte son virtuelle, mais accessible sur une vraie machine par la même voie), `pump_audio()` (`crates/omni-player/src/app.rs`) retournait immédiatement sans vider la file audio du pipeline. Le garde-fou de régulation ajouté en v1.4.0 (`if audio_tx.is_full() { sleep; continue; }` dans `crates/omni-core/src/pipeline/demuxer.rs`) bloquait alors définitivement le démultiplexeur dès que cette file se remplissait une première fois — vidéo figée, seek qui repositionne en interne mais ne peut plus produire de nouvelles images. Fix : la file audio du pipeline est toujours vidée, même sans moteur audio actif.
+- **[HAUTE] Dérive croissante (retard) sur la durée sans périphérique audio.** Une fois le blocage levé, `PipelineEvent::PositionChanged` recalait l'horloge sur le PTS de CHAQUE image décodée au lieu de la laisser tourner en temps réel (`crates/omni-player/src/player.rs`) — correct uniquement si le décodage est plus rapide que le temps réel, sinon le retard s'accumule indéfiniment (ex. rendu logiciel sans GPU). Fix : l'horloge n'est amorcée qu'au démarrage (transition Loading→Playing) puis tourne en roue libre sur le temps réel ; `sync_position_from_clock()` (nouveau, `app.rs`) garde `position` alignée dessus pour l'OSD/les sous-titres.
+
+### Vérification
+VM, vraie vidéo 60 s : 46 s de lecture continue restent alignées à ±20 ms sur le temps réel (contre 10-15 s de retard accumulé avant le correctif) ; seek avant/arrière répété fonctionnel ; pause/reprise, fin de fichier + relecture, sous-titres intégrés MKV toujours verts dans la même campagne.
+
+---
+
 ## v1.4.1 (2026-07-19) — Fix son accéléré
 
 ### Corrections
