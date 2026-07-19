@@ -41,6 +41,8 @@ pub struct OmniApp {
     video_color_space: u32,   // 0=BT601, 1=BT709, 2=BT2020
     last_title:        String, // pour détecter les changements de fichier
     paused_preview:    bool,   // seek en pause : afficher la frame preview à venir
+    dbg_start:         Option<std::time::Instant>,
+    dbg_last_log:      f64,
 }
 
 impl OmniApp {
@@ -88,6 +90,8 @@ impl OmniApp {
             video_color_space: 1,
             last_title: String::new(),
             paused_preview: false,
+            dbg_start: None,
+            dbg_last_log: 0.0,
         };
 
         // Restaure volume et vitesse de la session précédente
@@ -207,6 +211,19 @@ impl OmniApp {
         }
     }
 
+    /// Quand rien ne pilote l'horloge en continu (pas d'audio, pas de piste
+    /// audio, ou vitesse ≠ 1×), l'horloge tourne en roue libre sur le temps réel
+    /// (amorcée une fois au démarrage/seek, puis `elapsed*speed`). `position`
+    /// doit refléter CETTE horloge, pas le PTS brut de la dernière frame
+    /// décodée (sinon la position affichée == vitesse de décodage, pas le
+    /// temps réel — c'est ce qui causait la dérive en VM sans rendu GPU).
+    fn sync_position_from_clock(&mut self) {
+        if self.player.clock_audio_master { return; }
+        if matches!(self.player.state, PlayerState::Playing | PlayerState::Buffering(_)) {
+            self.player.position = self.player.clock.position_secs();
+        }
+    }
+
     /// Purge demandée par le player (seek / nouveau fichier) : audio buffurisé
     /// (jusqu'à 8 s de ring) + frame vidéo en attente.
     fn process_flush(&mut self) {
@@ -221,7 +238,19 @@ impl OmniApp {
     }
 
     fn pump_audio(&mut self) {
-        let Some(audio) = &self.audio else { return };
+        let Some(audio) = &self.audio else {
+            // Pas de périphérique de sortie (device absent/erreur d'ouverture, ex.
+            // AudioEngine::new() a échoué). Le pipeline pousse quand même des frames
+            // audio dans sa queue (audio_tx, capacité 512) et le demuxer ATTEND que
+            // cette queue se vide avant de continuer à lire le fichier (régulation
+            // anti-surproduction). Sans drainage ici, la queue se remplit une fois
+            // pour toutes et ne se vide plus jamais → demuxer bloqué en permanence →
+            // vidéo figée + seek qui "ne fait plus rien" (repositionne en interne
+            // mais ne peut plus produire de nouvelles frames). On drape donc
+            // toujours la queue, même sans rien en faire.
+            while self.player.try_recv_audio_frame().is_some() {}
+            return;
+        };
         audio.set_paused(self.player.state == PlayerState::Paused);
         audio.set_volume(self.player.effective_volume());
 
@@ -524,10 +553,28 @@ impl eframe::App for OmniApp {
         // Pipeline
         self.sync_clock_to_audio();
         self.player.poll_events();
+        self.sync_position_from_clock();
         self.process_seek();
         self.process_flush();
         self.pump_audio();
         self.pump_video();
+
+        // Sonde diagnostic (silencieuse par défaut — RUST_LOG=debug pour activer) :
+        // wall-clock réel vs position lue, pour détecter une dérive audio/vidéo.
+        if matches!(self.player.state, PlayerState::Playing) {
+            if self.dbg_start.is_none() { self.dbg_start = Some(std::time::Instant::now()); }
+            let wall = self.dbg_start.unwrap().elapsed().as_secs_f64();
+            if wall - self.dbg_last_log >= 3.0 {
+                self.dbg_last_log = wall;
+                let buffered = self.audio.as_ref().map(|a| a.buffered_secs()).unwrap_or(-1.0);
+                let raw_pos = self.audio.as_ref().and_then(|a| a.playback_position());
+                log::debug!("DBGPROBE wall={wall:.2} pos={:.2} clock={:.2} audio_master={} buffered={buffered:.2} raw_audio_pos={raw_pos:?}",
+                    self.player.position, self.player.clock.position_secs(), self.player.clock_audio_master);
+            }
+        } else {
+            self.dbg_start = None;
+            self.dbg_last_log = 0.0;
+        }
         self.ensure_image_texture(ctx);
 
         // Détection espace colorimétrique lors du chargement des métadonnées

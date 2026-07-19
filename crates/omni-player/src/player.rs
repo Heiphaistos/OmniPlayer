@@ -301,13 +301,19 @@ impl Player {
             match event {
                 PipelineEvent::DurationKnown(d) => { self.duration = d; }
                 PipelineEvent::PositionChanged(p) => {
-                    // p = position de décodage, en avance de tout le buffer sur la
-                    // lecture. Ne pilote l'horloge que si l'audio ne le fait pas.
-                    if !self.clock_audio_master {
+                    // p = position de décodage, pas de lecture réelle (en avance de
+                    // tout le buffer). Ne sert qu'à AMORCER l'horloge au démarrage
+                    // (ou après un seek) — une fois lancée, l'horloge tourne en
+                    // temps réel (wall-clock, via clock.resume()) et ne doit PAS
+                    // être re-pilotée par chaque nouvelle frame décodée : sinon la
+                    // position affichée == vitesse de décodage, pas le temps réel.
+                    // Sans audio pour la piloter en continu (voir sync_clock_to_audio
+                    // dans app.rs), un décodage plus lent que le temps réel (ex.
+                    // rendu logiciel en VM sans GPU) ferait dériver la lecture en
+                    // retard indéfiniment au lieu de sauter les frames en retard.
+                    if self.state == PlayerState::Loading {
                         self.position = p;
                         self.clock.update(p);
-                    }
-                    if self.state == PlayerState::Loading {
                         self.state = PlayerState::Playing;
                         self.clock.resume();
                     }
