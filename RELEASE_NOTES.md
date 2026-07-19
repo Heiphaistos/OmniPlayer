@@ -2,6 +2,25 @@
 
 ---
 
+## v1.4.4 (2026-07-19) — Fix barre de progression + playlists + tous formats
+
+### Corrections critiques
+
+- **[CRITIQUE] La barre de progression (seek bar) ne déclenchait jamais de vrai seek.** `seek_bar()` (`crates/omni-player/src/ui/controls.rs`) construit sa zone interactive via `ui.allocate_exact_size(..., Sense::click_and_drag())` — ce `Response` brut ne marque jamais `changed=true` automatiquement (seuls les widgets standards comme `Slider` appellent `mark_changed()` en interne). Le code appelant testait `if seek_bar(...).changed() { *seek_out = Some(pos); }`, toujours faux. Cliquer redessinait juste le curseur pour la frame courante avant qu'il ne revienne à l'ancienne position. Fix : `resp.mark_changed()` appelé explicitement.
+- **[HAUTE] Image figée après un seek pendant la pause sur fichier à GOP long/keyframe unique.** Le budget de décodage de la preview post-seek-en-pause (`crates/omni-core/src/pipeline/demuxer.rs`) plafonnait à 400 paquets TOTAUX (vidéo+audio+sous-titres). Sur un fichier à keyframe unique, rattraper une cible loin de celle-ci dépasse ce budget dilué → recherche abandonnée silencieusement, position/barre correctes mais image restée bloquée. Fix : budget temps réel (800 ms) au lieu d'un compte de paquets.
+- **Compatibilité "tout format" restaurée.** Le navigateur de fichiers intégré désactivait Ouvrir/double-clic pour toute extension hors d'une liste blanche codée en dur, alors que FFmpeg sniffe le contenu réel et ignore l'extension. Un fichier vidéo renommé (`.xyz123` testé) est maintenant ouvrable normalement.
+
+### Nouveautés
+
+- **Playlists enregistrables/chargeables** (M3U8/M3U) — nouveau module `playlist_io.rs`, boutons 💾/📂 dans le panneau playlist + menu Fichier, chemins relatifs résolus par rapport au fichier `.m3u`, entrées introuvables ignorées, URL réseau préservées. 3 tests unitaires verts.
+- Bouton "+ Ajouter" du panneau playlist (auparavant un stub sans effet) ouvre maintenant le navigateur de fichiers.
+- Compatibilité codecs validée au-delà de H.264/AAC/MP3 : VP9+Opus (WebM), AV1+Vorbis (MKV), FLAC.
+
+### Vérification
+Bugs de seek retrouvés en test manuel rigoureux (pause → clic barre → vérification image+position → reprise → vérification continuation), après qu'un premier test automatisé m'ait donné un faux positif (progression normale de lecture confondue avec un saut). Détails complets et liste des points restants dans `DEBUG_LOG.md` à la racine du repo.
+
+---
+
 ## v1.4.2 (2026-07-19) — Fix blocage + dérive sans périphérique audio
 
 ### Corrections
