@@ -2,6 +2,16 @@
 
 ---
 
+## v1.4.1 (2026-07-19) — Fix son accéléré
+
+### Corrections
+
+- **[CRITIQUE] Son en accéléré permanent sur certains PC** (indépendant de toute action utilisateur — pause/seek ne changeaient rien). Deux causes :
+  1. Le flux CPAL était ouvert avec le nombre de canaux natif du périphérique (ex. 6 sur un PC dont la sortie par défaut Windows est en 5.1/7.1, fréquent même sans enceintes surround), alors que `fill_ring` downmixe toujours vers stéréo avant de remplir le ring buffer. Le callback lisait N canaux/trame depuis des données n'en contenant que 2 → le ring se vidait N/2× trop vite. Fix : le flux est désormais forcé en stéréo (`AudioEngine::new`, `crates/omni-audio/src/output.rs`) ; WASAPI partagé convertit automatiquement, comme la plupart des lecteurs.
+  2. Si la création du resampler échouait, le code rejouait silencieusement les échantillons bruts à la mauvaise fréquence, sans jamais se rétablir (retenté chaque frame mais frappant la même erreur persistante). Fix : la trame est ignorée (silence ponctuel) et l'erreur loguée, plus jamais de lecture à mauvaise vitesse.
+
+---
+
 ## v1.4.0 (2026-07-19) — Lecture fiable de bout en bout
 
 ### Corrections
