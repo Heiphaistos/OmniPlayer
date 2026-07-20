@@ -2,6 +2,23 @@
 
 ---
 
+## v1.4.5 (2026-07-20) — Vrai pipeline HDR 10-bit
+
+### Nouveauté majeure
+
+- **HDR réellement 10-bit de bout en bout.** Le contenu HDR était décodé mais toujours tronqué en 8-bit avant l'affichage (`target_fmt` codé en dur en `YUV420P` dans `crates/omni-core/src/decoder/video.rs`, indépendamment du format source) — le badge "HDR" et les réglages de tone mapping existaient dans l'interface sans piloter de vrai pipeline. Implémenté de bout en bout :
+  - `desired_target()` préserve `YUV420P10LE` pour toute source 10-bit au lieu de forcer 8-bit ; `extract_planes` décale chaque échantillon de 6 bits (convention FFmpeg 10LE → convention P010).
+  - Textures GPU `R16Unorm` pour le HDR (feature wgpu `TEXTURE_FORMAT_16BIT_NORM` demandée explicitement à la création du device, `crates/omni-player/src/main.rs`, avec repli automatique en 8-bit tronqué si l'adaptateur ne la supporte pas — jamais de crash).
+  - Second passage de rendu : `VideoRenderer::render_to_offscreen` (YUV→RGB encodé PQ) puis `HdrTonemapper` (PQ inverse EOTF + Reinhard/ACES/Hable, déjà écrit précédemment mais jamais branché) vers le swapchain SDR. Sélection du chemin de rendu via `OmniApp.video_is_hdr`, réinitialisé à chaque ouverture de fichier pour éviter toute fuite d'état entre HDR et SDR dans la même session.
+
+### Vérification
+Testé avec un vrai fichier HDR10 généré (`ffmpeg -x265-params colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10=1`, HEVC yuv420p10le — transfert PQ réel, pas de fausses métadonnées) : ouverture, lecture, badge HDR, changement de mode tone mapping en direct via Paramètres, aucun plantage. Transition HDR→SDR testée explicitement dans la même session (risque de fuite d'état GPU) : propre, badge disparaît, vraie vidéo 1080p60 SDR relue sans artefact juste après. Lecture SDR existante non affectée, zéro nouvel avertissement de compilation.
+
+### Note
+Défaut mineur préexistant repéré incidemment (non lié au HDR, non corrigé) : le dialogue "Ouvrir une URL" accepte `file://` comme schéma valide mais FFmpeg le rejette sous Windows (`file:///C:/...` → ENOENT). Ctrl+O couvre déjà l'ouverture de fichiers locaux. Détails dans `DEBUG_LOG.md`.
+
+---
+
 ## v1.4.4 (2026-07-19) — Fix barre de progression + playlists + tous formats
 
 ### Corrections critiques
