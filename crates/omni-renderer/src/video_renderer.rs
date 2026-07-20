@@ -9,6 +9,11 @@ const SHADER_SRC: &str = include_str!("../../../assets/shaders/yuv_to_rgb.wgsl")
 /// Renderer wgpu : upload YUV → rendu RGB via shader WGSL.
 pub struct VideoRenderer {
     pipeline:          RenderPipeline,
+    /// Même shader, mais ciblant une texture offscreen Rgba16Float au lieu du
+    /// swapchain — utilisé pour le contenu HDR : cette passe produit du RGB
+    /// encodé PQ (pas encore de la lumière linéaire), qu'`HdrTonemapper`
+    /// consomme ensuite pour le vrai tone mapping avant affichage SDR.
+    pipeline_offscreen: RenderPipeline,
     sampler:           Sampler,
     bind_group_layout: BindGroupLayout,
     bind_group:        Option<BindGroup>,
@@ -17,7 +22,14 @@ pub struct VideoRenderer {
     uniform_bg:        BindGroup,
     #[allow(dead_code)] uniform_bgl: BindGroupLayout,
     current_color_space: u32,  // 0=BT601, 1=BT709, 2=BT2020
+    /// Vrai si le device a accordé `TEXTURE_FORMAT_16BIT_NORM` — sinon le
+    /// contenu HDR 10-bit est affiché en 8-bit (repli silencieux, pas pire
+    /// qu'avant cette fonctionnalité, jamais un crash).
+    supports_16bit: bool,
 }
+
+/// Format de la texture intermédiaire HDR (RGB encodé PQ, pas encore tonemap).
+pub const HDR_OFFSCREEN_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 /// Uniforms envoyés au shader — layout colonne-major pour WGSL mat4x4.
 /// `matrix[i]` = ième colonne. Vecteur input = [y', u', v', 1.0].
@@ -139,37 +151,43 @@ impl VideoRenderer {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label:       Some("video_pipeline"),
-            layout:      Some(&pipeline_layout),
-            vertex:      VertexState {
-                module:      &shader,
-                entry_point: Some("vs_main"),
-                buffers:     &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(FragmentState {
-                module:      &shader,
-                entry_point: Some("fs_main"),
-                targets:     &[Some(ColorTargetState {
-                    format:     surface_format,
-                    blend:      None,
-                    write_mask: ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive:    PrimitiveState {
-                topology: PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample:   MultisampleState::default(),
-            multiview:     None,
-            cache:         None,
-        });
+        let make_pipeline = |target_format: TextureFormat, label: &str| {
+            device.create_render_pipeline(&RenderPipelineDescriptor {
+                label:       Some(label),
+                layout:      Some(&pipeline_layout),
+                vertex:      VertexState {
+                    module:      &shader,
+                    entry_point: Some("vs_main"),
+                    buffers:     &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(FragmentState {
+                    module:      &shader,
+                    entry_point: Some("fs_main"),
+                    targets:     &[Some(ColorTargetState {
+                        format:     target_format,
+                        blend:      None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive:    PrimitiveState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample:   MultisampleState::default(),
+                multiview:     None,
+                cache:         None,
+            })
+        };
+
+        let pipeline            = make_pipeline(surface_format, "video_pipeline");
+        let pipeline_offscreen  = make_pipeline(HDR_OFFSCREEN_FORMAT, "video_pipeline_hdr_offscreen");
 
         Ok(Self {
             pipeline,
+            pipeline_offscreen,
             sampler,
             bind_group_layout,
             bind_group: None,
@@ -178,6 +196,7 @@ impl VideoRenderer {
             uniform_bg,
             uniform_bgl,
             current_color_space: 1,  // BT.709 par défaut
+            supports_16bit: device.features().contains(Features::TEXTURE_FORMAT_16BIT_NORM),
         })
     }
 
@@ -200,6 +219,7 @@ impl VideoRenderer {
             device,
             frame.width,
             frame.height,
+            frame.format.is_hdr10bit() && self.supports_16bit,
         );
         textures.upload(queue, frame);
 
@@ -229,6 +249,37 @@ impl VideoRenderer {
             rp.set_bind_group(1, &self.uniform_bg, &[]);
             rp.draw(0..4, 0..1);
         }
+    }
+
+    /// Encode le pass YUV→RGB(PQ) vers une texture offscreen (chemin HDR) —
+    /// ouvre et referme son propre RenderPass sur l'encoder donné, puisque
+    /// `paint()` d'egui_wgpu ne fournit qu'un seul RenderPass déjà lié au
+    /// swapchain (impossible d'y rediriger la sortie). Appelé depuis
+    /// `prepare()`, avant le pass principal d'egui.
+    pub fn render_to_offscreen(&self, encoder: &mut CommandEncoder, target: &TextureView) {
+        let Some(bg) = &self.bind_group else { return };
+        let mut rp = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("video_hdr_offscreen_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: Operations { load: LoadOp::Clear(Color::BLACK), store: StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rp.set_pipeline(&self.pipeline_offscreen);
+        rp.set_bind_group(0, bg, &[]);
+        rp.set_bind_group(1, &self.uniform_bg, &[]);
+        rp.draw(0..4, 0..1);
+    }
+
+    /// Dimensions du dernier frame uploadé, si disponible — utilisé pour
+    /// dimensionner la texture offscreen HDR sans conserver le frame
+    /// lui-même (l'upload le consomme).
+    pub fn frame_size(&self) -> Option<(u32, u32)> {
+        self.yuv_textures.as_ref().map(|t| (t.width, t.height))
     }
 }
 

@@ -1,5 +1,6 @@
 use eframe::{CreationContext, Frame};
 use egui::{CentralPanel, Context, Id, Key, Order};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use parking_lot::Mutex;
 
@@ -31,6 +32,11 @@ pub struct OmniApp {
     playlist_idx:      Option<usize>,
     seek_request:      Option<f64>,
     video_frame:       SharedFrame,
+    /// Vrai si le frame actuellement affiché est HDR 10-bit — état persistant
+    /// (pas seulement "nouveau frame ce tick") pour que le chemin de rendu
+    /// (SDR direct vs HDR deux passes) reste cohérent entre deux frames
+    /// décodées, y compris pendant la pause.
+    video_is_hdr:      Arc<AtomicBool>,
     osd:               Option<Osd>,
     #[allow(dead_code)] services: Option<ServicesClient>,
     last_mouse_move:   f64,
@@ -50,10 +56,18 @@ impl OmniApp {
         Self::apply_theme(&cc.egui_ctx);
 
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            let mut resources = rs.renderer.write();
             match VideoRenderer::new(&rs.device, rs.target_format) {
-                Ok(r)  => { rs.renderer.write().callback_resources.insert(r); }
+                Ok(r)  => { resources.callback_resources.insert(r); }
                 Err(e) => log::error!("VideoRenderer init: {e}"),
             }
+            // Second pass (chemin HDR) : tone mapping PQ→SDR. Toujours créé —
+            // coût quasi nul tant qu'aucun contenu HDR n'est lu (bind group
+            // vide, render() ne dessine rien).
+            resources.callback_resources.insert(
+                omni_renderer::HdrTonemapper::new(&rs.device, rs.target_format)
+            );
+            resources.callback_resources.insert(crate::video_callback::HdrOffscreen::default());
         }
 
         let audio = AudioEngine::new()
@@ -81,6 +95,7 @@ impl OmniApp {
             url_input: String::new(), is_fullscreen: false,
             playlist_items: Vec::new(), playlist_idx: None, seek_request: None,
             video_frame: Arc::new(Mutex::new(None)),
+            video_is_hdr: Arc::new(AtomicBool::new(false)),
             osd: initial_osd, services,
             last_mouse_move: 0.0,
             image_viewer: ImageViewer::default(),
@@ -139,6 +154,7 @@ impl OmniApp {
     fn open_file(&mut self, path: String) {
         log::info!("ouverture: {path}");
         *self.video_frame.lock() = None;
+        self.video_is_hdr.store(false, Ordering::Relaxed);
         self.pending_video_frame = None;
         self.config.add_recent(&path);
         // Reset image viewer pour nouvelle image
@@ -273,7 +289,7 @@ impl OmniApp {
         if self.player.state == PlayerState::Paused {
             if self.paused_preview {
                 if let Some(frame) = self.player.try_recv_video_frame() {
-                    *self.video_frame.lock() = Some(frame);
+                    self.set_video_frame(frame);
                     self.paused_preview = false;
                 }
             }
@@ -295,7 +311,7 @@ impl OmniApp {
             // (clock gelé → afficher quand même pour éviter un freeze total)
             if diff <= 0.020 || diff > 2.0 {
                 let frame = self.pending_video_frame.take().unwrap();
-                *self.video_frame.lock() = Some(frame);
+                self.set_video_frame(frame);
             }
             return;
         }
@@ -310,13 +326,21 @@ impl OmniApp {
             }
             if frame.pts_secs <= clock + 0.020 {
                 // Frame due maintenant → afficher
-                *self.video_frame.lock() = Some(frame);
+                self.set_video_frame(frame);
             } else {
                 // Frame trop en avance → mettre en attente, stopper
                 self.pending_video_frame = Some(frame);
             }
             break;
         }
+    }
+
+    /// Publie un frame décodé vers le callback de rendu, et met à jour l'état
+    /// HDR persistant utilisé pour choisir le chemin de rendu (SDR direct vs
+    /// HDR deux passes) même sur les repaints sans nouvelle frame.
+    fn set_video_frame(&mut self, frame: omni_core::decoder::DecodedVideoFrame) {
+        self.video_is_hdr.store(frame.format.is_hdr10bit(), Ordering::Relaxed);
+        *self.video_frame.lock() = Some(frame);
     }
 
     fn ensure_image_texture(&mut self, ctx: &Context) {
@@ -738,6 +762,9 @@ impl eframe::App for OmniApp {
                     &mut self.image_viewer,
                     &self.config.aspect_mode,
                     self.video_color_space,
+                    self.video_is_hdr.load(Ordering::Relaxed),
+                    self.config.tonemap_mode,
+                    self.config.max_luminance,
                 );
             });
         if toggle_fs {

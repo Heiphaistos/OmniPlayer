@@ -2,7 +2,7 @@
   <h1>OmniPlayer</h1>
   <p><strong>Lecteur multimédia haute performance sous Windows — pipeline Rust/wgpu + services Go.</strong></p>
 
-  ![Version](https://img.shields.io/badge/version-1.4.4-blue)
+  ![Version](https://img.shields.io/badge/version-1.4.5-blue)
   ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?logo=windows)
   ![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust)
   ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go)

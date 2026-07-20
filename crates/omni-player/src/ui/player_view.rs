@@ -18,6 +18,9 @@ pub fn show(
     img_viewer:  &mut ImageViewer,
     aspect_mode: &AspectMode,
     color_space: u32,
+    is_hdr:        bool,
+    tonemap_mode:  u32,
+    max_luminance: f32,
 ) -> bool {
     let available = ui.available_rect_before_wrap();
 
@@ -49,7 +52,7 @@ pub fn show(
         .map(|v| compute_video_rect(available, v.width, v.height, aspect_mode))
         .unwrap_or(available);
 
-    draw_video(ui, available, video_rect, video_frame, color_space);
+    draw_video(ui, available, video_rect, video_frame, color_space, is_hdr, tonemap_mode, max_luminance);
 
     // Zone d'interaction (double-clic = plein écran)
     let vid_resp = ui.allocate_rect(available, Sense::click());
@@ -98,11 +101,16 @@ fn compute_video_rect(available: Rect, video_w: u32, video_h: u32, mode: &Aspect
 
 // ─── Rendu vidéo ─────────────────────────────────────────────────────────────
 
-fn draw_video(ui: &mut Ui, available: Rect, video_rect: Rect, video_frame: SharedFrame, color_space: u32) {
+fn draw_video(
+    ui: &mut Ui, available: Rect, video_rect: Rect, video_frame: SharedFrame, color_space: u32,
+    is_hdr: bool, tonemap_mode: u32, max_luminance: f32,
+) {
     ui.painter().rect_filled(available, 0.0, Color32::BLACK);
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         video_rect,
-        crate::video_callback::VideoPaintCallback { frame: video_frame, color_space },
+        crate::video_callback::VideoPaintCallback {
+            frame: video_frame, color_space, is_hdr, tonemap_mode, max_luminance,
+        },
     ));
 }
 

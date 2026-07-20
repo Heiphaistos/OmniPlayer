@@ -7,7 +7,7 @@ mod ui;
 mod video_callback;
 
 use anyhow::Result;
-use eframe::{NativeOptions, egui::ViewportBuilder};
+use eframe::{NativeOptions, egui::ViewportBuilder, egui_wgpu, wgpu};
 use std::sync::Arc;
 
 fn main() -> Result<()> {
@@ -31,6 +31,31 @@ fn main() -> Result<()> {
             .with_min_inner_size([640.0, 400.0])
             .with_icon(load_icon()),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                device_descriptor: Arc::new(|adapter| {
+                    // 16-bit non-normalisé : nécessaire pour l'upload direct des
+                    // textures YUV 10-bit HDR sans passer par une texture entière
+                    // + normalisation manuelle dans le shader. Demandé seulement
+                    // si l'adaptateur le supporte réellement (repli silencieux en
+                    // 8-bit sur le matériel qui ne l'a pas — cf. VideoRenderer).
+                    let optional = wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+                    let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                        wgpu::Limits::downlevel_webgl2_defaults()
+                    } else {
+                        wgpu::Limits::default()
+                    };
+                    wgpu::DeviceDescriptor {
+                        label: Some("omniplayer wgpu device"),
+                        required_features: adapter.features() & optional,
+                        required_limits: wgpu::Limits { max_texture_dimension_2d: 8192, ..base_limits },
+                        memory_hints: wgpu::MemoryHints::default(),
+                    }
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

@@ -22,12 +22,12 @@ pub struct DecodedVideoFrame {
 pub struct VideoDecoder {
     decoder:     ffmpeg::codec::decoder::Video,
     scaler:      Option<SwsContext>,
-    target_fmt:  ffmpeg::format::Pixel,
     time_base:   f64,
     // Tracks source properties to detect mid-stream changes requiring scaler rebuild.
     scaler_src_w:   u32,
     scaler_src_h:   u32,
     scaler_src_fmt: Option<ffmpeg::format::Pixel>,
+    scaler_target_fmt: Option<ffmpeg::format::Pixel>,
 }
 
 impl VideoDecoder {
@@ -35,12 +35,27 @@ impl VideoDecoder {
         Ok(Self {
             decoder,
             scaler: None,
-            target_fmt: ffmpeg::format::Pixel::YUV420P,
             time_base,
             scaler_src_w:   0,
             scaler_src_h:   0,
             scaler_src_fmt: None,
+            scaler_target_fmt: None,
         })
+    }
+
+    /// Format cible pour le scaler : préserve les 10 bits pour les sources HDR
+    /// (PQ/HLG déjà en 10-bit) au lieu de tout tronquer en 8-bit YUV420P — sinon
+    /// le HDR est décodé mais toujours écrasé en SDR avant même le rendu.
+    /// Tout le reste (immense majorité SDR 8-bit) va en YUV420P, inchangé.
+    fn desired_target(src: ffmpeg::format::Pixel) -> ffmpeg::format::Pixel {
+        use ffmpeg::format::Pixel::*;
+        match src {
+            YUV420P10LE | YUV420P10BE
+            | YUV422P10LE | YUV422P10BE
+            | YUV444P10LE | YUV444P10BE
+            | P010LE | P010BE => YUV420P10LE,
+            _ => YUV420P,
+        }
     }
 
     /// Envoie un paquet compressé au décodeur.
@@ -69,13 +84,16 @@ impl VideoDecoder {
             .map(|p| p as f64 * self.time_base)
             .unwrap_or(0.0);
 
-        // Conversion de format si nécessaire (ex: yuv420p10le → yuv420p)
-        let frame = if raw.format() != self.target_fmt {
-            // Rebuild scaler if source dimensions or pixel format changed mid-stream.
+        // Conversion de format si nécessaire (ex: yuv420p10le nvidia → yuv420p10le
+        // uniforme, ou tout format exotique → yuv420p)
+        let target_fmt = Self::desired_target(raw.format());
+        let frame = if raw.format() != target_fmt {
+            // Rebuild scaler if source dimensions, pixel format, or target changed.
             let needs_rebuild = self.scaler.is_none()
                 || self.scaler_src_w   != raw.width()
                 || self.scaler_src_h   != raw.height()
-                || self.scaler_src_fmt != Some(raw.format());
+                || self.scaler_src_fmt != Some(raw.format())
+                || self.scaler_target_fmt != Some(target_fmt);
 
             if needs_rebuild {
                 self.scaler = Some(
@@ -83,7 +101,7 @@ impl VideoDecoder {
                         raw.format(),
                         raw.width(),
                         raw.height(),
-                        self.target_fmt,
+                        target_fmt,
                         raw.width(),
                         raw.height(),
                         Flags::BILINEAR,
@@ -93,6 +111,7 @@ impl VideoDecoder {
                 self.scaler_src_w   = raw.width();
                 self.scaler_src_h   = raw.height();
                 self.scaler_src_fmt = Some(raw.format());
+                self.scaler_target_fmt = Some(target_fmt);
             }
 
             let scaler = self.scaler.as_mut().expect("scaler vient d'être initialisé");
@@ -132,6 +151,22 @@ fn extract_planes(frame: &ffmpeg::util::frame::video::Video) -> (Vec<Vec<u8>>, V
 
             (vec![y, u, v], vec![y_stride, uv_stride, uv_stride], PixelFormat::Yuv420p)
         }
+        ffmpeg::format::Pixel::YUV420P10LE => {
+            let (_w, h) = (frame.width() as usize, frame.height() as usize);
+            let y_stride  = frame.stride(0);
+            let uv_stride = frame.stride(1);
+
+            // FFmpeg stocke le 10-bit dans les bits BAS de chaque mot 16-bit.
+            // On décale de 6 bits vers les bits HAUTS (convention P010) pour que
+            // la normalisation automatique R16Unorm du shader (valeur/65535)
+            // retombe exactement sur le même ratio noir/blanc/plage limitée
+            // qu'en 8-bit — aucun changement de shader nécessaire.
+            let y = shift_10_to_16(&frame.data(0)[..y_stride * h]);
+            let u = shift_10_to_16(&frame.data(1)[..uv_stride * (h / 2)]);
+            let v = shift_10_to_16(&frame.data(2)[..uv_stride * (h / 2)]);
+
+            (vec![y, u, v], vec![y_stride, uv_stride, uv_stride], PixelFormat::Yuv420p10le)
+        }
         ffmpeg::format::Pixel::NV12 => {
             let (_w, h) = (frame.width() as usize, frame.height() as usize);
             let y_stride  = frame.stride(0);
@@ -147,4 +182,16 @@ fn extract_planes(frame: &ffmpeg::util::frame::video::Video) -> (Vec<Vec<u8>>, V
             (vec![data], vec![stride], PixelFormat::Rgba)
         }
     }
+}
+
+/// Décale chaque échantillon 16-bit little-endian de 6 bits vers la gauche :
+/// convertit la convention FFmpeg 10LE (valeur dans les bits bas) vers la
+/// convention P010 (valeur dans les bits hauts) attendue par le shader.
+fn shift_10_to_16(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    for chunk in data.chunks_exact(2) {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+        out.extend_from_slice(&(v << 6).to_le_bytes());
+    }
+    out
 }
