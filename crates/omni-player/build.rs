@@ -2,7 +2,25 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+fn embed_windows_resources() {
+    // .ico + métadonnées exe (FileDescription/ProductName/LegalCopyright déjà déclarées
+    // dans [package.metadata.winresource] du Cargo.toml, mais jamais réellement
+    // consommées faute d'appel ici -- l'exe tournait avec l'icône générique par défaut.
+    winresource::WindowsResource::new()
+        .set_icon("assets/icon.ico")
+        .set("FileDescription", "OmniPlayer — Lecteur Multimédia Ultra-Complet")
+        .set("ProductName", "OmniPlayer")
+        .set("LegalCopyright", "MIT")
+        .set("OriginalFilename", "omniplayer.exe")
+        .compile()
+        .expect("échec de l'intégration des ressources Windows (icône/métadonnées)");
+}
+
 fn main() {
+    #[cfg(windows)]
+    embed_windows_resources();
+
     let ffmpeg_dir = env::var("FFMPEG_DIR").unwrap_or_else(|_| "C:/ffmpeg".to_string());
     let ffmpeg_bin = PathBuf::from(&ffmpeg_dir).join("bin");
 
